@@ -27,10 +27,6 @@ CopyBuffer::CopyBuffer() :
 	;
 }
 
-size_t CopyBuffer::GetTileCount() {
-	return tiles ? (size_t)tiles->size() : 0;
-}
-
 BaseMap& CopyBuffer::getBufferMap() {
 	ASSERT(tiles);
 	return *tiles;
@@ -48,6 +44,12 @@ Position CopyBuffer::getPosition() const {
 void CopyBuffer::clear() {
 	delete tiles;
 	tiles = nullptr;
+}
+
+void CopyBuffer::replace(BaseMap* map, const Position& position) {
+	clear();
+	tiles = map;
+	copyPos = position;
 }
 
 void CopyBuffer::copy(Editor& editor, int floor) {

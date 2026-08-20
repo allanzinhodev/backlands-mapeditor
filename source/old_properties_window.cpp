@@ -31,6 +31,8 @@
 #include "old_properties_window.h"
 #include "container_properties_window.h"
 
+#include <limits>
+
 // ============================================================================
 // Old Properties Window
 
@@ -42,11 +44,78 @@ END_EVENT_TABLE()
 
 static constexpr int OUTFIT_COLOR_MAX = 133;
 
+namespace {
+
+	class FluidTypeClientData final : public wxClientData {
+	public:
+		explicit FluidTypeClientData(uint16_t value) :
+			value(value) { }
+
+		uint16_t value;
+	};
+
+	struct FluidChoiceEntry {
+		uint16_t id;
+	};
+
+	static constexpr FluidChoiceEntry FLUID_CHOICES[] = {
+		{ LIQUID_WATER },
+		{ LIQUID_BLOOD },
+		{ LIQUID_BEER },
+		{ LIQUID_SLIME },
+		{ LIQUID_LEMONADE },
+		{ LIQUID_MILK },
+		{ LIQUID_MANAFLUID },
+		{ LIQUID_INK },
+		{ LIQUID_WATER2 },
+		{ LIQUID_LIFEFLUID },
+		{ LIQUID_OIL },
+		{ LIQUID_SLIME2 },
+		{ LIQUID_URINE },
+		{ LIQUID_COCONUT_MILK },
+		{ LIQUID_WINE },
+		{ LIQUID_MUD },
+		{ LIQUID_FRUIT_JUICE },
+		{ LIQUID_LAVA },
+		{ LIQUID_RUM },
+		{ LIQUID_SWAMP },
+		{ LIQUID_TEA },
+		{ LIQUID_MEAD },
+	};
+
+	wxString GetFluidTypeLabel(uint16_t fluidType) {
+		wxString label = wxstr(Item::LiquidID2Name(fluidType));
+		if (fluidType == LIQUID_WATER2 || fluidType == LIQUID_SLIME2) {
+			label << " (Legacy ID " << fluidType << ")";
+		} else {
+			label << " (ID " << fluidType << ")";
+		}
+		return label;
+	}
+
+	void AppendFluidType(wxChoice* choice, uint16_t fluidType, const wxString& label) {
+		choice->Append(label, static_cast<wxClientData*>(newd FluidTypeClientData(fluidType)));
+	}
+
+	void AppendFluidType(wxChoice* choice, uint16_t fluidType) {
+		AppendFluidType(choice, fluidType, GetFluidTypeLabel(fluidType));
+	}
+
+	int FindFluidTypeSelection(wxChoice* choice, uint16_t fluidType) {
+		for (unsigned int index = 0; index < choice->GetCount(); ++index) {
+			auto* data = dynamic_cast<FluidTypeClientData*>(choice->GetClientObject(index));
+			if (data && data->value == fluidType) {
+				return static_cast<int>(index);
+			}
+		}
+		return wxNOT_FOUND;
+	}
+
+} // namespace
+
 OldPropertiesWindow::OldPropertiesWindow(wxWindow* win_parent, const Map* map, const Tile* tile_parent, Item* item, wxPoint pos) :
 	ObjectPropertiesWindowBase(win_parent, "Item Properties", map, tile_parent, item, pos),
 	count_field(nullptr),
-	direction_field(nullptr),
-	creature_weight_field(nullptr),
 	action_id_field(nullptr),
 	unique_id_field(nullptr),
 	door_id_field(nullptr),
@@ -54,7 +123,9 @@ OldPropertiesWindow::OldPropertiesWindow(wxWindow* win_parent, const Map* map, c
 	depot_id_field(nullptr),
 	splash_type_field(nullptr),
 	text_field(nullptr),
-	description_field(nullptr) {
+	description_field(nullptr),
+	direction_field(nullptr),
+	creature_weight_field(nullptr) {
 	ASSERT(edit_item);
 
 	wxSizer* topsizer = newd wxBoxSizer(wxVERTICAL);
@@ -167,22 +238,22 @@ OldPropertiesWindow::OldPropertiesWindow(wxWindow* win_parent, const Map* map, c
 		// Splash types
 		splash_type_field = newd wxChoice(this, wxID_ANY);
 		if (edit_item->isFluidContainer()) {
-			splash_type_field->Append(wxstr(Item::LiquidID2Name(LIQUID_NONE)), newd int32_t(LIQUID_NONE));
+			AppendFluidType(splash_type_field, LIQUID_NONE);
 		}
 
-		for (SplashType splashType = LIQUID_FIRST; splashType != LIQUID_LAST; ++splashType) {
-			splash_type_field->Append(wxstr(Item::LiquidID2Name(splashType)), newd int32_t(splashType));
+		for (const FluidChoiceEntry& entry : FLUID_CHOICES) {
+			AppendFluidType(splash_type_field, entry.id);
 		}
 
-		if (item->getSubtype()) {
-			const std::string& what = Item::LiquidID2Name(item->getSubtype());
-			if (what == "Unknown") {
-				splash_type_field->Append(wxstr(Item::LiquidID2Name(LIQUID_NONE)), newd int32_t(LIQUID_NONE));
-			}
-			splash_type_field->SetStringSelection(wxstr(what));
-		} else {
-			splash_type_field->SetSelection(0);
+		const uint16_t subtype = item->getSubtype();
+		int selection = FindFluidTypeSelection(splash_type_field, subtype);
+		if (selection == wxNOT_FOUND) {
+			wxString label;
+			label << "Unknown (ID " << subtype << ")";
+			AppendFluidType(splash_type_field, subtype, label);
+			selection = static_cast<int>(splash_type_field->GetCount() - 1);
 		}
+		splash_type_field->SetSelection(selection);
 
 		subsizer->Add(splash_type_field, wxSizerFlags(1).Expand());
 
@@ -479,8 +550,6 @@ OldPropertiesWindow::OldPropertiesWindow(wxWindow* win_parent, const Map* map, c
 OldPropertiesWindow::OldPropertiesWindow(wxWindow* win_parent, const Map* map, const Tile* tile_parent, Creature* creature, wxPoint pos) :
 	ObjectPropertiesWindowBase(win_parent, "Creature Properties", map, tile_parent, creature, pos),
 	count_field(nullptr),
-	direction_field(nullptr),
-	creature_weight_field(nullptr),
 	action_id_field(nullptr),
 	unique_id_field(nullptr),
 	door_id_field(nullptr),
@@ -488,7 +557,9 @@ OldPropertiesWindow::OldPropertiesWindow(wxWindow* win_parent, const Map* map, c
 	depot_id_field(nullptr),
 	splash_type_field(nullptr),
 	text_field(nullptr),
-	description_field(nullptr) {
+	description_field(nullptr),
+	direction_field(nullptr),
+	creature_weight_field(nullptr) {
 	ASSERT(edit_creature);
 
 	wxSizer* topsizer = newd wxBoxSizer(wxVERTICAL);
@@ -515,7 +586,8 @@ OldPropertiesWindow::OldPropertiesWindow(wxWindow* win_parent, const Map* map, c
 	subsizer->Add(direction_field, wxSizerFlags(1).Expand());
 
 	subsizer->Add(newd wxStaticText(this, wxID_ANY, "Weight"));
-	creature_weight_field = newd wxSpinCtrl(this, wxID_ANY, i2ws(edit_creature->getWeight()), wxDefaultPosition, wxDefaultSize, wxSP_ARROW_KEYS, 0, 100, edit_creature->getWeight());
+	const int editableWeight = static_cast<int>(std::min<uint32_t>(edit_creature->getWeight(), std::numeric_limits<int>::max()));
+	creature_weight_field = newd wxSpinCtrl(this, wxID_ANY, i2ws(editableWeight), wxDefaultPosition, wxDefaultSize, wxSP_ARROW_KEYS, 0, std::numeric_limits<int>::max(), editableWeight);
 	subsizer->Add(creature_weight_field, wxSizerFlags(1).Expand());
 
 	boxsizer->Add(subsizer, wxSizerFlags(1).Expand());
@@ -535,8 +607,6 @@ OldPropertiesWindow::OldPropertiesWindow(wxWindow* win_parent, const Map* map, c
 OldPropertiesWindow::OldPropertiesWindow(wxWindow* win_parent, const Map* map, const Tile* tile_parent, Spawn* spawn, wxPoint pos) :
 	ObjectPropertiesWindowBase(win_parent, "Spawn Properties", map, tile_parent, spawn, pos),
 	count_field(nullptr),
-	direction_field(nullptr),
-	creature_weight_field(nullptr),
 	action_id_field(nullptr),
 	unique_id_field(nullptr),
 	door_id_field(nullptr),
@@ -544,7 +614,9 @@ OldPropertiesWindow::OldPropertiesWindow(wxWindow* win_parent, const Map* map, c
 	depot_id_field(nullptr),
 	splash_type_field(nullptr),
 	text_field(nullptr),
-	description_field(nullptr) {
+	description_field(nullptr),
+	direction_field(nullptr),
+	creature_weight_field(nullptr) {
 	ASSERT(edit_spawn);
 
 	wxSizer* topsizer = newd wxBoxSizer(wxVERTICAL);
@@ -575,11 +647,6 @@ OldPropertiesWindow::OldPropertiesWindow(wxWindow* win_parent, const Map* map, c
 
 OldPropertiesWindow::~OldPropertiesWindow() {
 	// Warning: edit_item may no longer be valid, DONT USE IT!
-	if (splash_type_field) {
-		for (uint32_t i = 0; i < splash_type_field->GetCount(); ++i) {
-			delete reinterpret_cast<int*>(splash_type_field->GetClientData(i));
-		}
-	}
 	if (direction_field) {
 		for (uint32_t i = 0; i < direction_field->GetCount(); ++i) {
 			delete reinterpret_cast<int*>(direction_field->GetClientData(i));
@@ -672,9 +739,25 @@ void OldPropertiesWindow::OnClickOK(wxCommandEvent& WXUNUSED(event)) {
 			edit_item->setText(text);
 		} else if (edit_item->isSplash() || edit_item->isFluidContainer()) {
 			// Splash
+			if (!splash_type_field) {
+				g_gui.PopupDialog(this, "Error", "Fluid type selection is unavailable; the item was not changed.", wxOK);
+				return;
+			}
+
+			const int selection = splash_type_field->GetSelection();
+			if (selection == wxNOT_FOUND) {
+				g_gui.PopupDialog(this, "Error", "Select a fluid type before saving; the item was not changed.", wxOK);
+				return;
+			}
+
+			auto* fluidType = dynamic_cast<FluidTypeClientData*>(splash_type_field->GetClientObject(selection));
+			if (!fluidType) {
+				g_gui.PopupDialog(this, "Error", "The selected fluid type is invalid; the item was not changed.", wxOK);
+				return;
+			}
+
 			int new_uid = unique_id_field->GetValue();
 			int new_aid = action_id_field->GetValue();
-			int* new_type = reinterpret_cast<int*>(splash_type_field->GetClientData(splash_type_field->GetSelection()));
 
 			if ((new_uid < 1000 || new_uid > 0xFFFF) && new_uid != 0) {
 				g_gui.PopupDialog(this, "Error", "Unique ID must be between 1000 and 65535.", wxOK);
@@ -688,9 +771,7 @@ void OldPropertiesWindow::OnClickOK(wxCommandEvent& WXUNUSED(event)) {
 				g_gui.PopupDialog(this, "Error", "Action ID must be between 100 and 65535.", wxOK);
 				return;
 			}
-			if (new_type) {
-				edit_item->setSubtype(*new_type);
-			}
+			edit_item->setSubtype(fluidType->value);
 			edit_item->setUniqueID(new_uid);
 			edit_item->setActionID(new_aid);
 

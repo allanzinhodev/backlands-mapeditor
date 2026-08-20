@@ -16,12 +16,12 @@
 //////////////////////////////////////////////////////////////////////
 
 #include "main.h"
-#include "theme.h"
 
 #include "dat_debug_view.h"
 
 #include "graphics.h"
 #include "gui.h"
+#include "theme.h"
 
 // ============================================================================
 //

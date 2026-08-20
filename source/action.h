@@ -21,6 +21,7 @@
 #include "position.h"
 
 #include <deque>
+#include <string>
 
 class Editor;
 class Tile;
@@ -36,10 +37,23 @@ enum ChangeType {
 	CHANGE_TILE,
 	CHANGE_MOVE_HOUSE_EXIT,
 	CHANGE_MOVE_WAYPOINT,
+	CHANGE_ZONE_REGISTRY,
+	CHANGE_RENAME_ZONE,
 };
 
 class Change {
 private:
+	struct ZoneRegistryChange {
+		std::string name;
+		unsigned int id;
+		bool add;
+	};
+
+	struct ZoneRenameChange {
+		std::string from;
+		std::string to;
+	};
+
 	ChangeType type;
 	void* data;
 
@@ -49,6 +63,8 @@ public:
 	Change(Tile* tile);
 	static Change* Create(House* house, const Position& where);
 	static Change* Create(Waypoint* wp, const Position& where);
+	static Change* CreateZone(const std::string& name, unsigned int id, bool add);
+	static Change* RenameZone(const std::string& oldName, const std::string& newName);
 	~Change();
 	void clear();
 
@@ -67,41 +83,8 @@ public:
 
 typedef std::vector<Change*> ChangeList;
 
-// A dirty list represents a list of all tiles that was changed in an action
-class DirtyList {
-public:
-	DirtyList();
-	~DirtyList();
-
-	struct ValueType {
-		uint32_t pos;
-		uint32_t floors;
-	};
-
-	uint32_t owner;
-
-protected:
-	struct Comparator {
-		bool operator()(const ValueType& a, const ValueType& b) const {
-			return a.pos < b.pos;
-		}
-	};
-
-public:
-	typedef std::set<ValueType, Comparator> SetType;
-
-	void AddPosition(int x, int y, int z);
-	void AddChange(Change* c);
-	bool Empty() const {
-		return iset.empty() && ichanges.empty();
-	}
-
-protected:
-	SetType iset;
-	ChangeList ichanges;
-};
-
 enum ActionIdentifier {
+	ACTION_NONE,
 	ACTION_MOVE,
 	ACTION_REMOTE,
 	ACTION_SELECT,
@@ -115,6 +98,10 @@ enum ActionIdentifier {
 	ACTION_ROTATE_ITEM,
 	ACTION_REPLACE_ITEMS,
 	ACTION_CHANGE_PROPERTIES,
+	ACTION_GENERATE_AREA,
+	ACTION_IMPORT_MINIMAP,
+	ACTION_IMPORT_PNG,
+	ACTION_ZONE_EDIT,
 };
 
 class Action {
@@ -135,17 +122,18 @@ public:
 		return type;
 	}
 
-	void commit(DirtyList* dirty_list);
+	void commit();
 	bool isCommited() const {
 		return commited;
 	}
-	void undo(DirtyList* dirty_list);
-	void redo(DirtyList* dirty_list) {
-		commit(dirty_list);
+	void undo();
+	void redo() {
+		commit();
 	}
 
 protected:
 	Action(Editor& editor, ActionIdentifier ident);
+	void applyZoneChange(Change* change);
 
 	bool commited;
 	ChangeList changes;
@@ -176,6 +164,9 @@ public:
 
 	virtual void addAction(Action* action);
 	virtual void addAndCommitAction(Action* action);
+	// Revert all already-committed child actions. Intended for transactional
+	// producers that must recover if a later construction phase fails.
+	void rollback();
 
 protected:
 	BatchAction(Editor& editor, ActionIdentifier ident);
@@ -221,6 +212,8 @@ public:
 	bool canRedo() {
 		return current < actions.size();
 	}
+	ActionIdentifier getUndoType() const;
+	ActionIdentifier getRedoType() const;
 
 protected:
 	size_t current;

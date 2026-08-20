@@ -1,0 +1,6 @@
+
+=== RME diagnostic session ===
+[info] Diagnostic log: D:\topdown\map\rme.log
+[info] RME starting
+[info] Theme: System Default
+[info] Application event loop started

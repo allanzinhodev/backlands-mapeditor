@@ -27,6 +27,7 @@
 #include "waypoints.h"
 #include "zones.h"
 #include "templates.h"
+#include "map_format.h"
 
 #include <unordered_set>
 
@@ -56,7 +57,6 @@ public:
 
 	// Operations on the entire map
 	void cleanInvalidTiles(bool showdialog = false);
-	void cleanDeletedZones(bool showdialog = false);
 	Position getZonePosition(unsigned int zoneId);
 	void convertHouseTiles(uint32_t fromId, uint32_t toId);
 
@@ -135,6 +135,21 @@ public:
 	const std::string& getSpawnNpcFilename() const {
 		return spawnNpcFile;
 	}
+	SpawnFormat getSpawnFormat() const {
+		return spawnFormat;
+	}
+	MapStorageFormat getStorageFormat() const {
+		return storageFormat;
+	}
+	ItemIdSpace getItemIdSpace() const {
+		return itemIdSpace;
+	}
+	uint32_t getSourceItemMajorVersion() const {
+		return sourceItemMajorVersion;
+	}
+	uint32_t getSourceItemMinorVersion() const {
+		return sourceItemMinorVersion;
+	}
 	const std::string& getZoneFilename() const {
 		return zonefile;
 	}
@@ -145,6 +160,28 @@ public:
 	void setMapDescription(const std::string& new_description);
 	void setHouseFilename(const std::string& new_housefile);
 	void setSpawnFilename(const std::string& new_spawnfile);
+	void setSpawnNpcFilename(const std::string& new_spawnfile) {
+		spawnNpcFile = new_spawnfile;
+	}
+	void setSpawnFormat(SpawnFormat format) {
+		spawnFormat = format;
+	}
+	void setStorageFormat(MapStorageFormat format) {
+		storageFormat = format;
+	}
+	void setItemIdSpace(ItemIdSpace space) {
+		itemIdSpace = space;
+	}
+	void setSourceItemVersion(uint32_t majorVersion, uint32_t minorVersion) {
+		sourceItemMajorVersion = majorVersion;
+		sourceItemMinorVersion = minorVersion;
+	}
+	void setSpawnSaveTarget(SpawnFormat format, const std::string& primaryFile, const std::string& npcFile) {
+		spawnFormat = format;
+		spawnfile = primaryFile;
+		spawnNpcFile = npcFile;
+		spawnFilenamesExplicit = true;
+	}
 	void setZoneFilename(const std::string& new_zonefile);
 
 	void flagAsNamed() {
@@ -182,6 +219,12 @@ protected:
 	std::string housefile; // The housefile
 	std::string waypointfile; // The waypoints file (stores extended waypoint information such as id, preferred icon and matching town)
 	std::string zonefile; // The zonefile
+	SpawnFormat spawnFormat = SpawnFormat::Tfs;
+	MapStorageFormat storageFormat = MapStorageFormat::Tfs;
+	ItemIdSpace itemIdSpace = ItemIdSpace::Server;
+	uint32_t sourceItemMajorVersion = 0;
+	uint32_t sourceItemMinorVersion = 0;
+	bool spawnFilenamesExplicit = false;
 
 public:
 	Towns towns;
@@ -194,19 +237,27 @@ protected:
 
 	friend class IOMapOTBM;
 	friend class Editor;
+	friend class SpawnMapAdapter;
+	friend class GUI;
 
 public:
 	Waypoints waypoints;
 	Zones zones;
 
 private:
-	std::vector<uint16_t> uniqueIds;
+	// Reference count per unique id, indexed directly by the id. A flat 64K table
+	// keeps insertion O(1) during a map load, where a linear scan degrades into
+	// O(n^2) once the id space fills up. Counting also fixes the previous
+	// behaviour, where two items sharing a uid produced a single entry and the
+	// first removal dropped it while the other item was still on the map.
+	// Allocated on first use, so an empty map costs nothing.
+	std::vector<uint32_t> uidRefCount;
 };
 
 template <typename ForeachType>
 inline void foreach_ItemOnMap(Map& map, ForeachType& foreach, bool selectedTiles) {
 	MapIterator tileiter = map.begin();
-	MapIterator const end = map.end();
+	const MapIterator end = map.end();
 	long long done = 0;
 
 	while (tileiter != end) {
@@ -254,7 +305,7 @@ inline void foreach_ItemOnMap(Map& map, ForeachType& foreach, bool selectedTiles
 template <typename ForeachType>
 inline void foreach_TileOnMap(Map& map, ForeachType& foreach) {
 	MapIterator tileiter = map.begin();
-	MapIterator const end = map.end();
+	const MapIterator end = map.end();
 	long long done = 0;
 
 	while (tileiter != end) {
@@ -266,7 +317,7 @@ inline void foreach_TileOnMap(Map& map, ForeachType& foreach) {
 template <typename RemoveIfType>
 inline long long remove_if_TileOnMap(Map& map, RemoveIfType& remove_if) {
 	MapIterator tileiter = map.begin();
-	MapIterator const end = map.end();
+	const MapIterator end = map.end();
 	long long done = 0;
 	long long removed = 0;
 	long long total = map.getTileCount();
@@ -290,7 +341,7 @@ inline int64_t RemoveItemOnMap(Map& map, RemoveIfType& condition, bool selectedO
 	int64_t removed = 0;
 
 	MapIterator it = map.begin();
-	MapIterator const end = map.end();
+	const MapIterator end = map.end();
 
 	while (it != end) {
 		++done;
@@ -329,7 +380,7 @@ inline int64_t RemoveItemDuplicateOnMap(Map& map, RemoveIfType& condition, bool 
 	int64_t removed = 0;
 
 	MapIterator it = map.begin();
-	MapIterator const end = map.end();
+	const MapIterator end = map.end();
 
 	while (it != end) {
 		++done;

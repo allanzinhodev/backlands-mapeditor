@@ -21,11 +21,13 @@
 #include <string>
 #include <sstream>
 #include <vector>
+#include <array>
 #include <limits>
 #include <unordered_set>
 #include <unordered_map>
 #include <memory>
 #include "gl_renderer.h"
+#include "minimap_page_cache.h"
 
 class GameSprite;
 
@@ -36,8 +38,8 @@ struct MapTooltip {
 	};
 
 	MapTooltip(int x, int y, std::string text, uint8_t r, uint8_t g, uint8_t b) :
-		x(x), y(y), text(text), r(r), g(g), b(b) {
-		ellipsis = (text.length() - 3) > MAX_CHARS;
+		x(x), y(y), text(std::move(text)), r(r), g(g), b(b) {
+		ellipsis = (this->text.length() - 3) > MAX_CHARS;
 	}
 
 	void checkLineEnding() {
@@ -81,6 +83,7 @@ struct DrawingOptions {
 	bool show_special_tiles;
 	bool show_zone_areas;
 	bool show_items;
+	unsigned int active_zone_id;
 
 	bool highlight_items;
 	bool highlight_locked_doors;
@@ -100,6 +103,7 @@ struct DrawingOptions {
 	bool experimental_fog;
 
 	bool use_fbo_scene_cache = false;
+	int post_process_effect = 0;
 };
 
 class MapCanvas;
@@ -213,6 +217,7 @@ class MapDrawer {
 	DrawingOptions options;
 	std::shared_ptr<LightDrawer> light_drawer;
 	std::unique_ptr<GLRenderer> renderer = std::make_unique<GLRenderer>();
+	MinimapPageCache minimap_page_cache;
 
 	float zoom;
 
@@ -226,19 +231,31 @@ class MapDrawer {
 	int tile_size;
 	int floor;
 
+	static constexpr float FAR_ZOOM_THRESHOLD = 6.0f;
+	static constexpr long VIEWPORT_SETTLE_DELAY_MS = 200;
+	bool medium_zoom_mode = false;
+	bool far_zoom_mode = false;
+
 	bool scene_dirty = true;
-	bool prev_view_initialized = false;
-	int prev_view_scroll_x = 0;
-	int prev_view_scroll_y = 0;
-	float prev_zoom = -1.0f;
-	int prev_floor = -1;
-	int prev_start_z = -1;
-	int prev_screensize_x = -1;
-	int prev_screensize_y = -1;
+	bool input_view_initialized = false;
+	float last_input_zoom = -1.0f;
+	int last_input_scroll_x = 0;
+	int last_input_scroll_y = 0;
+	wxStopWatch viewport_settle_timer;
+	bool viewport_settle_pending = false;
+
+	bool cached_scene_initialized = false;
+	float cached_scene_zoom = -1.0f;
+	int cached_scroll_x = 0;
+	int cached_scroll_y = 0;
+	int cached_floor = -1;
+	int cached_start_z = -1;
+	int cached_screensize_x = -1;
+	int cached_screensize_y = -1;
 
 protected:
 	std::unordered_map<unsigned int, std::vector<FinderPosition>> zoneTiles;
-	std::vector<MapTooltip*> tooltips;
+	std::vector<MapTooltip> tooltips;
 	std::ostringstream tooltip;
 	wxStopWatch pos_indicator_timer;
 	Position pos_indicator;
@@ -247,8 +264,16 @@ protected:
 	wxStopWatch perf_update_timer;
 	int frame_count = 0;
 	double current_fps = 0.0;
+	double average_fps = 0.0;
+	std::array<double, 60> fps_history {};
+	size_t fps_history_size = 0;
+	size_t fps_history_index = 0;
+	double fps_history_sum = 0.0;
 	double current_cpu = 0.0;
 	size_t current_ram = 0;
+	double last_scene_ms = 0.0;
+	size_t visible_tile_count = 0;
+	size_t visible_item_count = 0;
 
 #ifdef __WINDOWS__
 	ULARGE_INTEGER last_cpu_time;
@@ -269,14 +294,21 @@ public:
 	void SetupVars();
 	void SetupGL();
 	void Release();
+	GLRenderer* getRenderer() const noexcept {
+		return renderer.get();
+	}
 
 	void Draw();
 	void DrawScene();
 	void DrawOverlays();
+	void DrawMinimapImportOverlay();
 	void markDirty();
+	void invalidateMinimapPages();
 	bool isSceneDirty();
+	bool isViewportInteractionActive() const;
 	void DrawBackground();
 	void DrawMap();
+	void DrawMapMinimapPages();
 	void DrawDraggingShadow();
 	void DrawHigherFloors();
 	void DrawSelectionBox();
@@ -286,6 +318,7 @@ public:
 	void DrawTooltips();
 	void DrawPerformanceStats();
 	void DrawLight();
+	void DrawIngamePreviewPlayer();
 
 	void TakeScreenshot(uint8_t* screenshot_buffer);
 
@@ -308,7 +341,7 @@ protected:
 	void BlitSpriteType(int screenx, int screeny, uint32_t spriteid, int red = 255, int green = 255, int blue = 255, int alpha = 255);
 	void BlitSpriteType(int screenx, int screeny, GameSprite* spr, int red = 255, int green = 255, int blue = 255, int alpha = 255);
 	void BlitCreature(int screenx, int screeny, const Creature* c, int red = 255, int green = 255, int blue = 255, int alpha = 255);
-	void BlitCreature(int screenx, int screeny, const Outfit& outfit, Direction dir, int red = 255, int green = 255, int blue = 255, int alpha = 255);
+	void BlitCreature(int screenx, int screeny, const Outfit& outfit, Direction dir, int red = 255, int green = 255, int blue = 255, int alpha = 255, int animationFrame = 0);
 	void BlitSquare(int sx, int sy, int red, int green, int blue, int alpha, int size = 0);
 	void DrawRawBrush(int screenx, int screeny, ItemType* itemType, uint8_t r, uint8_t g, uint8_t b, uint8_t alpha);
 	void DrawTile(TileLocation* tile);
@@ -321,7 +354,6 @@ protected:
 	void MakeTooltip(int screenx, int screeny, const std::string& text, uint8_t r = 255, uint8_t g = 255, uint8_t b = 255);
 	void UpdateRAMUsage();
 	void UpdateCPUUsage();
-	std::string FormatPerformanceStats() const;
 	void AddLight(TileLocation* location);
 
 	enum BrushColor {
@@ -341,7 +373,7 @@ protected:
 	void glColor(wxColor color);
 	void glColor(BrushColor color);
 	void glColorCheck(Brush* brush, const Position& pos);
-	void drawRect(int x, int y, int w, int h, const wxColor& color, float width = 1.0f);
+	void drawRect(int x, int y, int w, int h, const wxColor& color, int width = 1);
 	void drawFilledRect(int x, int y, int w, int h, const wxColor& color);
 	void glFillQuad(float x0, float y0, float x1, float y1, float x2, float y2, float x3, float y3);
 	GLColor m_brushColor { 255, 255, 255, 128 };

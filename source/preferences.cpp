@@ -21,6 +21,7 @@
 
 #include "settings.h"
 #include "client_version.h"
+#include "client_assets.h"
 
 #include "gui.h"
 
@@ -85,6 +86,11 @@ wxNotebookPage* PreferencesWindow::CreateGeneralPage() {
 	only_one_instance_chkbox->SetToolTip("When checked, maps opened using the shell will all be opened in the same instance.");
 	sizer->Add(only_one_instance_chkbox, 0, wxLEFT | wxTOP, 5);
 
+	diagnostic_log_chkbox = newd wxCheckBox(general_page, wxID_ANY, "Write diagnostic log (rme.log)");
+	diagnostic_log_chkbox->SetValue(g_settings.getBoolean(Config::ENABLE_DIAGNOSTIC_LOG));
+	diagnostic_log_chkbox->SetToolTip("Record diagnostic and crash information in rme.log next to the executable. Restart required.");
+	sizer->Add(diagnostic_log_chkbox, 0, wxLEFT | wxTOP, 5);
+
 	enable_tileset_editing_chkbox = newd wxCheckBox(general_page, wxID_ANY, "Enable tileset editing");
 	enable_tileset_editing_chkbox->SetValue(g_settings.getInteger(Config::SHOW_TILESET_EDITOR) == 1);
 	enable_tileset_editing_chkbox->SetToolTip("Show tileset editing options.");
@@ -101,17 +107,17 @@ wxNotebookPage* PreferencesWindow::CreateGeneralPage() {
 	SetWindowToolTip(tmptext, undo_size_spin, "How many action you can undo, be aware that a high value will increase memory usage.");
 
 	grid_sizer->Add(tmptext = newd wxStaticText(general_page, wxID_ANY, "Undo maximum memory size (MB): "), 0);
-	undo_mem_size_spin = newd wxSpinCtrl(general_page, wxID_ANY, i2ws(g_settings.getInteger(Config::UNDO_MEM_SIZE)), wxDefaultPosition, wxDefaultSize, wxSP_ARROW_KEYS, 0, 16384);
+	undo_mem_size_spin = newd wxSpinCtrl(general_page, wxID_ANY, i2ws(g_settings.getInteger(Config::UNDO_MEM_SIZE)), wxDefaultPosition, wxDefaultSize, wxSP_ARROW_KEYS, 0, 1048576);
 	grid_sizer->Add(undo_mem_size_spin, 0);
-	SetWindowToolTip(tmptext, undo_mem_size_spin, "The approximite limit for the memory usage of the undo queue.");
+	SetWindowToolTip(tmptext, undo_mem_size_spin, "The approximate limit for the memory usage of the undo queue.");
 
 	grid_sizer->Add(tmptext = newd wxStaticText(general_page, wxID_ANY, "Worker Threads: "), 0);
-	worker_threads_spin = newd wxSpinCtrl(general_page, wxID_ANY, i2ws(g_settings.getInteger(Config::WORKER_THREADS)), wxDefaultPosition, wxDefaultSize, wxSP_ARROW_KEYS, 1, 64);
+	worker_threads_spin = newd wxSpinCtrl(general_page, wxID_ANY, i2ws(g_settings.getInteger(Config::WORKER_THREADS)), wxDefaultPosition, wxDefaultSize, wxSP_ARROW_KEYS, Config::MIN_WORKER_THREADS, Config::MAX_WORKER_THREADS);
 	grid_sizer->Add(worker_threads_spin, 0);
 	SetWindowToolTip(tmptext, worker_threads_spin, "How many threads the editor will use for intensive operations. This should be equivalent to the amount of logical processors in your system.");
 
 	grid_sizer->Add(tmptext = newd wxStaticText(general_page, wxID_ANY, "Replace count: "), 0);
-	replace_size_spin = newd wxSpinCtrl(general_page, wxID_ANY, i2ws(g_settings.getInteger(Config::REPLACE_SIZE)), wxDefaultPosition, wxDefaultSize, wxSP_ARROW_KEYS, 0, 100000);
+	replace_size_spin = newd wxSpinCtrl(general_page, wxID_ANY, i2ws(g_settings.getInteger(Config::REPLACE_SIZE)), wxDefaultPosition, wxDefaultSize, wxSP_ARROW_KEYS, 0, 10000000);
 	grid_sizer->Add(replace_size_spin, 0);
 	SetWindowToolTip(tmptext, replace_size_spin, "How many items you can replace on the map using the Replace Item tool.");
 
@@ -248,6 +254,15 @@ wxNotebookPage* PreferencesWindow::CreateGraphicsPage() {
 	subsizer->Add(tmp = newd wxStaticText(graphics_page, wxID_ANY, "Icon background color: "), 0);
 	subsizer->Add(icon_background_choice, 0);
 	SetWindowToolTip(icon_background_choice, tmp, "This will change the background color on icons in all windows.");
+
+	post_process_choice = newd wxChoice(graphics_page, wxID_ANY);
+	post_process_choice->Append("Off");
+	post_process_choice->Append("Sharpen");
+	post_process_choice->Append("Retro scanlines");
+	post_process_choice->SetSelection(std::clamp(g_settings.getInteger(Config::POST_PROCESS_EFFECT), 0, 2));
+	subsizer->Add(tmp = newd wxStaticText(graphics_page, wxID_ANY, "Post-process effect: "), 0);
+	subsizer->Add(post_process_choice, 0);
+	SetWindowToolTip(post_process_choice, tmp, "Optional full-scene shader. Off preserves the original rendering path and has no shader overhead.");
 
 	// Animation framerate
 	subsizer->Add(tmp = newd wxStaticText(graphics_page, wxID_ANY, "Animation FPS: "), 0);
@@ -390,7 +405,7 @@ wxNotebookPage* PreferencesWindow::CreateUIPage() {
 	wxNotebookPage* ui_page = newd wxPanel(book, wxID_ANY);
 
 	wxSizer* sizer = newd wxBoxSizer(wxVERTICAL);
-		auto* theme_sizer = newd wxFlexGridSizer(2, 10, 10);
+	auto* theme_sizer = newd wxFlexGridSizer(2, 10, 10);
 	theme_sizer->AddGrowableCol(1);
 	auto* theme_label = newd wxStaticText(ui_page, wxID_ANY, "Theme:");
 	theme_choice = newd wxChoice(ui_page, wxID_ANY);
@@ -587,6 +602,29 @@ wxNotebookPage* PreferencesWindow::CreateClientPage() {
 	client_list_sizer->Add(npcs_lua_dir_picker, wxSizerFlags(0).Border(wxRIGHT, 10).Expand());
 	SetWindowToolTip(npcs_lua_text, npcs_lua_dir_picker, "Path to server NPC Lua files.");
 
+	auto* canary_crystal_assets_text = newd wxStaticText(client_list_window, wxID_ANY, "CipSoft/Crystal or OTC Assets root:");
+	client_list_sizer->Add(canary_crystal_assets_text, wxSizerFlags(0).Expand());
+	canary_crystal_assets_dir_picker = newd wxDirPickerCtrl(
+		client_list_window,
+		wxID_ANY,
+		ClientAssets::getPath(),
+		"Select a CipSoft/Crystal client root or an OTC root",
+		wxDefaultPosition,
+		wxDefaultSize,
+		wxDIRP_USE_TEXTCTRL | wxDIRP_DIR_MUST_EXIST
+	);
+	client_list_sizer->Add(canary_crystal_assets_dir_picker, wxSizerFlags(0).Border(wxRIGHT, 10).Expand());
+	SetWindowToolTip(
+		canary_crystal_assets_text,
+		canary_crystal_assets_dir_picker,
+		"Client root containing package.json and assets/catalog-content.json."
+	);
+	canary_crystal_assets_dir_picker->Bind(
+		wxEVT_DIRPICKER_CHANGED,
+		&PreferencesWindow::OnCanaryCrystalAssetsChanged,
+		this
+	);
+
 	// Set the sizers
 	client_list_window->SetSizer(client_list_sizer);
 	client_list_window->FitInside();
@@ -600,8 +638,9 @@ wxNotebookPage* PreferencesWindow::CreateClientPage() {
 // Event handlers!
 
 void PreferencesWindow::OnClickOK(wxCommandEvent& WXUNUSED(event)) {
-	Apply();
-	EndModal(0);
+	if (Apply()) {
+		EndModal(0);
+	}
 }
 
 void PreferencesWindow::OnClickCancel(wxCommandEvent& WXUNUSED(event)) {
@@ -612,6 +651,24 @@ void PreferencesWindow::OnClickApply(wxCommandEvent& WXUNUSED(event)) {
 	Apply();
 }
 
+void PreferencesWindow::OnCanaryCrystalAssetsChanged(wxFileDirPickerEvent& event) {
+	const wxString selectedPath = event.GetPath();
+	if (selectedPath.empty()) {
+		return;
+	}
+
+	ClientAssetsManifest manifest;
+	wxString error;
+	wxArrayString warnings;
+	if (!ClientAssets::validatePath(selectedPath, manifest, error, warnings)) {
+		g_gui.PopupDialog(this, "Invalid CipSoft/Crystal or OTC Assets root", error, wxOK | wxICON_ERROR);
+		return;
+	}
+	if (!warnings.empty()) {
+		g_gui.ListDialog("CipSoft/Crystal or OTC Assets validation warnings", warnings);
+	}
+}
+
 void PreferencesWindow::OnCollapsiblePane(wxCollapsiblePaneEvent& event) {
 	auto* win = (wxWindow*)event.GetEventObject();
 	win->GetParent()->Fit();
@@ -619,7 +676,22 @@ void PreferencesWindow::OnCollapsiblePane(wxCollapsiblePaneEvent& event) {
 
 // Stuff
 
-void PreferencesWindow::Apply() {
+bool PreferencesWindow::Apply() {
+	const wxString selectedAssetsPath = canary_crystal_assets_dir_picker->GetPath();
+	if (!selectedAssetsPath.empty()) {
+		ClientAssetsManifest manifest;
+		wxString assetsError;
+		wxArrayString assetsWarnings;
+		if (!ClientAssets::validatePath(selectedAssetsPath, manifest, assetsError, assetsWarnings)) {
+			book->SetSelection(4);
+			g_gui.PopupDialog(this, "Invalid CipSoft/Crystal or OTC Assets root", assetsError, wxOK | wxICON_ERROR);
+			return false;
+		}
+		if (!assetsWarnings.empty()) {
+			g_gui.ListDialog("CipSoft/Crystal or OTC Assets validation warnings", assetsWarnings);
+		}
+	}
+
 	bool must_restart = false;
 	bool palette_update_needed = false;
 
@@ -627,6 +699,10 @@ void PreferencesWindow::Apply() {
 	g_settings.setInteger(Config::WELCOME_DIALOG, show_welcome_dialog_chkbox->GetValue());
 	g_settings.setInteger(Config::ALWAYS_MAKE_BACKUP, always_make_backup_chkbox->GetValue());
 	g_settings.setInteger(Config::ONLY_ONE_INSTANCE, only_one_instance_chkbox->GetValue());
+	if (g_settings.getBoolean(Config::ENABLE_DIAGNOSTIC_LOG) != diagnostic_log_chkbox->GetValue()) {
+		must_restart = true;
+	}
+	g_settings.setInteger(Config::ENABLE_DIAGNOSTIC_LOG, diagnostic_log_chkbox->GetValue());
 	g_settings.setInteger(Config::UNDO_SIZE, undo_size_spin->GetValue());
 	g_settings.setInteger(Config::UNDO_MEM_SIZE, undo_mem_size_spin->GetValue());
 	g_settings.setInteger(Config::WORKER_THREADS, worker_threads_spin->GetValue());
@@ -653,6 +729,7 @@ void PreferencesWindow::Apply() {
 	// Graphics
 	g_settings.setInteger(Config::USE_GUI_SELECTION_SHADOW, icon_selection_shadow_chkbox->GetValue());
 	g_settings.setInteger(Config::USE_FBO_SCENE_CACHE, fbo_scene_cache_chkbox->GetValue());
+	g_settings.setInteger(Config::POST_PROCESS_EFFECT, std::max(0, post_process_choice->GetSelection()));
 	g_settings.setInteger(Config::ANIMATION_FPS, animation_fps_spin->GetValue());
 	if (g_settings.getBoolean(Config::USE_MEMCACHED_SPRITES) != use_memcached_chkbox->GetValue()) {
 		must_restart = true;
@@ -745,6 +822,8 @@ void PreferencesWindow::Apply() {
 	// Client
 	g_settings.setString(Config::MONSTERS_LUA_DIRECTORY, nstr(monsters_lua_dir_picker->GetPath()));
 	g_settings.setString(Config::NPCS_LUA_DIRECTORY, nstr(npcs_lua_dir_picker->GetPath()));
+	ClientAssets::setPath(selectedAssetsPath);
+	ClientAssets::saveConfiguredPath();
 
 	ClientVersionList versions = ClientVersion::getAllVisible();
 	int version_counter = 0;
@@ -784,4 +863,6 @@ void PreferencesWindow::Apply() {
 		g_gui.PopupDialog("Error", error, wxOK);
 		g_gui.ListDialog("Warnings", warnings);
 	}
+	g_gui.RefreshView();
+	return true;
 }

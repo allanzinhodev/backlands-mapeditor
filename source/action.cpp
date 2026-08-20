@@ -54,6 +54,20 @@ Change* Change::Create(Waypoint* wp, const Position& where) {
 	return c;
 }
 
+Change* Change::CreateZone(const std::string& name, unsigned int id, bool add) {
+	auto* c = newd Change();
+	c->type = CHANGE_ZONE_REGISTRY;
+	c->data = newd ZoneRegistryChange { name, id, add };
+	return c;
+}
+
+Change* Change::RenameZone(const std::string& oldName, const std::string& newName) {
+	auto* c = newd Change();
+	c->type = CHANGE_RENAME_ZONE;
+	c->data = newd ZoneRenameChange { oldName, newName };
+	return c;
+}
+
 Change::~Change() {
 	clear();
 }
@@ -71,6 +85,14 @@ void Change::clear() {
 		case CHANGE_MOVE_WAYPOINT:
 			ASSERT(data);
 			delete reinterpret_cast<std::pair<std::string, Position>*>(data);
+			break;
+		case CHANGE_ZONE_REGISTRY:
+			ASSERT(data);
+			delete reinterpret_cast<ZoneRegistryChange*>(data);
+			break;
+		case CHANGE_RENAME_ZONE:
+			ASSERT(data);
+			delete reinterpret_cast<ZoneRenameChange*>(data);
 			break;
 		case CHANGE_NONE:
 			break;
@@ -93,6 +115,18 @@ uint32_t Change::memsize() const {
 			ASSERT(data);
 			mem += reinterpret_cast<Tile*>(data)->memsize();
 			break;
+		case CHANGE_ZONE_REGISTRY: {
+			ASSERT(data);
+			const auto* change = reinterpret_cast<ZoneRegistryChange*>(data);
+			mem += sizeof(ZoneRegistryChange) + change->name.capacity();
+			break;
+		}
+		case CHANGE_RENAME_ZONE: {
+			ASSERT(data);
+			const auto* change = reinterpret_cast<ZoneRenameChange*>(data);
+			mem += sizeof(ZoneRenameChange) + change->from.capacity() + change->to.capacity();
+			break;
+		}
 		default:
 			break;
 	}
@@ -103,6 +137,33 @@ Action::Action(Editor& editor, ActionIdentifier ident) :
 	commited(false),
 	editor(editor),
 	type(ident) {
+}
+
+void Action::applyZoneChange(Change* c) {
+	switch (c->type) {
+		case CHANGE_ZONE_REGISTRY: {
+			auto* change = reinterpret_cast<Change::ZoneRegistryChange*>(c->data);
+			ASSERT(change);
+			const bool changed = change->add ? editor.map.zones.addZone(change->name, change->id) : editor.map.zones.removeZone(change->name);
+			if (changed) {
+				change->add = !change->add;
+			}
+			break;
+		}
+
+		case CHANGE_RENAME_ZONE: {
+			auto* change = reinterpret_cast<Change::ZoneRenameChange*>(c->data);
+			ASSERT(change);
+			if (editor.map.zones.renameZone(change->from, change->to)) {
+				std::swap(change->from, change->to);
+			}
+			break;
+		}
+
+		default:
+			ASSERT(false);
+			break;
+	}
 }
 
 Action::~Action() {
@@ -132,6 +193,11 @@ size_t Action::memsize() const {
 				break;
 			}
 
+			case CHANGE_ZONE_REGISTRY:
+			case CHANGE_RENAME_ZONE:
+				mem += c->memsize();
+				break;
+
 			default:
 				break;
 		}
@@ -140,7 +206,7 @@ size_t Action::memsize() const {
 	return mem;
 }
 
-void Action::commit(DirtyList* dirty_list) {
+void Action::commit() {
 	editor.selection.start(Selection::INTERNAL);
 	ChangeList::const_iterator it = changes.begin();
 	while (it != changes.end()) {
@@ -257,6 +323,11 @@ void Action::commit(DirtyList* dirty_list) {
 				break;
 			}
 
+			case CHANGE_ZONE_REGISTRY:
+			case CHANGE_RENAME_ZONE:
+				applyZoneChange(c);
+				break;
+
 			default:
 				break;
 		}
@@ -266,7 +337,7 @@ void Action::commit(DirtyList* dirty_list) {
 	commited = true;
 }
 
-void Action::undo(DirtyList* dirty_list) {
+void Action::undo() {
 	if (changes.empty()) {
 		return;
 	}
@@ -366,6 +437,11 @@ void Action::undo(DirtyList* dirty_list) {
 				break;
 			}
 
+			case CHANGE_ZONE_REGISTRY:
+			case CHANGE_RENAME_ZONE:
+				applyZoneChange(c);
+				break;
+
 			default:
 				break;
 		}
@@ -452,15 +528,19 @@ void BatchAction::addAndCommitAction(Action* action) {
 	}
 
 	// Add it!
-	action->commit(nullptr);
+	action->commit();
 	batch.push_back(action);
 	timestamp = time(nullptr);
+}
+
+void BatchAction::rollback() {
+	undo();
 }
 
 void BatchAction::commit() {
 	for (Action* action : batch) {
 		if (action && !action->isCommited()) {
-			action->commit(nullptr);
+			action->commit();
 		}
 	}
 }
@@ -468,7 +548,7 @@ void BatchAction::commit() {
 void BatchAction::undo() {
 	for (Action* action : std::views::reverse(batch)) {
 		if (action) {
-			action->undo(nullptr);
+			action->undo();
 		}
 	}
 }
@@ -476,7 +556,7 @@ void BatchAction::undo() {
 void BatchAction::redo() {
 	for (Action* action : batch) {
 		if (action) {
-			action->redo(nullptr);
+			action->redo();
 		}
 	}
 }
@@ -543,38 +623,42 @@ void ActionQueue::addBatch(BatchAction* batch, int stacking_delay) {
 		delete todelete;
 	}
 
-	while (memory_size > size_t(1024 * 1024 * g_settings.getInteger(Config::UNDO_MEM_SIZE)) && !actions.empty()) {
+	bool merged = false;
+	if (!actions.empty()) {
+		BatchAction* lastAction = actions.back();
+		if (lastAction->type == batch->type && g_settings.getInteger(Config::GROUP_ACTIONS) && time(nullptr) - stacking_delay < lastAction->timestamp) {
+			lastAction->merge(batch);
+			lastAction->timestamp = time(nullptr);
+			memory_size -= lastAction->memsize();
+			memory_size += lastAction->memsize(true);
+			delete batch;
+			merged = true;
+		}
+	}
+
+	if (!merged) {
+		memory_size += batch->memsize();
+		actions.push_back(batch);
+		batch->timestamp = time(nullptr);
+		current++;
+	}
+
+	const size_t max_undo_memory = static_cast<size_t>(std::max(0, g_settings.getInteger(Config::UNDO_MEM_SIZE))) * 1024ULL * 1024ULL;
+	while (memory_size > max_undo_memory && !actions.empty()) {
 		memory_size -= actions.front()->memsize();
 		delete actions.front();
 		actions.pop_front();
 		current--;
 	}
 
-	if (actions.size() > size_t(g_settings.getInteger(Config::UNDO_SIZE)) && !actions.empty()) {
+	const size_t max_undo_size = static_cast<size_t>(std::max(0, g_settings.getInteger(Config::UNDO_SIZE)));
+	while (actions.size() > max_undo_size && !actions.empty()) {
 		memory_size -= actions.front()->memsize();
 		BatchAction* todelete = actions.front();
 		actions.pop_front();
 		delete todelete;
 		current--;
 	}
-
-	do {
-		if (!actions.empty()) {
-			BatchAction* lastAction = actions.back();
-			if (lastAction->type == batch->type && g_settings.getInteger(Config::GROUP_ACTIONS) && time(nullptr) - stacking_delay < lastAction->timestamp) {
-				lastAction->merge(batch);
-				lastAction->timestamp = time(nullptr);
-				memory_size -= lastAction->memsize();
-				memory_size += lastAction->memsize(true);
-				delete batch;
-				break;
-			}
-		}
-		memory_size += batch->memsize();
-		actions.push_back(batch);
-		batch->timestamp = time(nullptr);
-		current++;
-	} while (false);
 }
 
 void ActionQueue::addAction(Action* action, int stacking_delay) {
@@ -616,31 +700,10 @@ void ActionQueue::clear() {
 	current = 0;
 }
 
-DirtyList::DirtyList() :
-	owner(0) {
-	;
+ActionIdentifier ActionQueue::getUndoType() const {
+	return current > 0 ? actions[current - 1]->getType() : ACTION_NONE;
 }
 
-DirtyList::~DirtyList() {
-	;
+ActionIdentifier ActionQueue::getRedoType() const {
+	return current < actions.size() ? actions[current]->getType() : ACTION_NONE;
 }
-
-void DirtyList::AddPosition(int x, int y, int z) {
-	uint32_t m = ((x >> 2) << 18) | ((y >> 2) << 4);
-	ValueType fi = { m, 0 };
-	auto s = iset.find(fi);
-	if (s != iset.end()) {
-		ValueType v = *s;
-		iset.erase(s);
-		v.floors = (1 << z) | v.floors;
-		iset.insert(v);
-	} else {
-		ValueType v = { m, (uint32_t)(1 << z) };
-		iset.insert(v);
-	}
-}
-
-void DirtyList::AddChange(Change* c) {
-	ichanges.push_back(c);
-}
-

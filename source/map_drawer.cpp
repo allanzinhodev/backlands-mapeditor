@@ -34,14 +34,20 @@
 #include <thread>
 #include <sstream>
 #include <iomanip>
+#include <chrono>
+#include <cmath>
+#include <iterator>
 
 #include "editor.h"
+#include "autoborder_preview.h"
 #include "gui.h"
 #include "sprites.h"
 #include "map_drawer.h"
+#include "minimap_import.h"
 #include "map_display.h"
 #include "copybuffer.h"
 #include "graphics.h"
+#include "sprite_appearances.h"
 
 #include "creature_brush.h"
 #include "house_exit_brush.h"
@@ -50,6 +56,30 @@
 #include "light_drawer.h"
 
 using Color = std::tuple<int, int, int>;
+
+namespace {
+	struct PreparedSpritePart {
+		int screen_x;
+		int screen_y;
+		GameSprite::SpriteTex texture;
+	};
+
+	template <typename Loader>
+	bool AppendPreparedSpriteParts(int screenX, int screenY, int width, int height, int layers, Loader loader, std::vector<PreparedSpritePart>& parts) {
+		parts.reserve(parts.size() + static_cast<size_t>(width) * height * layers);
+		bool complete = true;
+		for (int cx = 0; cx != width; ++cx) {
+			for (int cy = 0; cy != height; ++cy) {
+				for (int layer = 0; layer != layers; ++layer) {
+					auto texture = loader(cx, cy, layer);
+					complete = texture.texture != 0 && complete;
+					parts.push_back({ screenX - cx * TileSize, screenY - cy * TileSize, texture });
+				}
+			}
+		}
+		return complete;
+	}
+}
 
 static std::vector<Color> colors;
 void GenerateColors() {
@@ -89,6 +119,29 @@ void GenerateColors() {
 	}
 }
 
+static Color GetZoneColor(const Tile& tile, unsigned int activeZoneId) {
+	if (activeZoneId != 0 && tile.hasZone(activeZoneId)) {
+		return colors.at(activeZoneId % colors.size());
+	}
+
+	uint32_t red = 0;
+	uint32_t green = 0;
+	uint32_t blue = 0;
+	for (const unsigned int zoneId : tile.zones) {
+		const Color& colour = colors.at(zoneId % colors.size());
+		red += std::get<0>(colour);
+		green += std::get<1>(colour);
+		blue += std::get<2>(colour);
+	}
+
+	const size_t zoneCount = tile.zones.size();
+	return {
+		static_cast<int>(red / zoneCount),
+		static_cast<int>(green / zoneCount),
+		static_cast<int>(blue / zoneCount),
+	};
+}
+
 DrawingOptions::DrawingOptions() {
 	SetDefault();
 	GenerateColors();
@@ -114,6 +167,7 @@ void DrawingOptions::SetDefault() {
 	show_special_tiles = true;
 	show_zone_areas = true;
 	show_items = true;
+	active_zone_id = 0;
 
 	highlight_items = false;
 	highlight_locked_doors = true;
@@ -126,6 +180,7 @@ void DrawingOptions::SetDefault() {
 	show_preview = false;
 	show_hooks = false;
 	hide_items_when_zoomed = true;
+	post_process_effect = 0;
 }
 
 void DrawingOptions::SetIngame() {
@@ -148,6 +203,7 @@ void DrawingOptions::SetIngame() {
 	show_special_tiles = false;
 	show_zone_areas = false;
 	show_items = true;
+	active_zone_id = 0;
 
 	highlight_items = false;
 	highlight_locked_doors = false;
@@ -160,6 +216,7 @@ void DrawingOptions::SetIngame() {
 	show_preview = false;
 	show_hooks = false;
 	hide_items_when_zoomed = false;
+	post_process_effect = 0;
 }
 
 bool DrawingOptions::isDrawLight() const noexcept {
@@ -190,6 +247,7 @@ MapDrawer::MapDrawer(MapCanvas* canvas) :
 
 MapDrawer::~MapDrawer() {
 	Release();
+	minimap_page_cache.releaseGL();
 }
 
 void MapDrawer::SetupVars() {
@@ -226,6 +284,9 @@ void MapDrawer::SetupVars() {
 
 	end_x = start_x + screensize_x / tile_size + 2;
 	end_y = start_y + screensize_y / tile_size + 2;
+
+	medium_zoom_mode = zoom > 3.0f && zoom < FAR_ZOOM_THRESHOLD;
+	far_zoom_mode = zoom >= FAR_ZOOM_THRESHOLD;
 }
 
 void MapDrawer::SetupGL() {
@@ -247,15 +308,13 @@ void MapDrawer::SetupGL() {
 	glTranslatef(0.375f, 0.375f, 0.0f);
 
 	renderer->init();
+	renderer->beginFrame();
 	renderer->setOrtho(0.0f, static_cast<float>(vPort[2]) * zoom, static_cast<float>(vPort[3]) * zoom, 0.0f);
 }
 
 void MapDrawer::Release() {
 	renderer->endFrame();
 
-	for (std::vector<MapTooltip*>::const_iterator it = tooltips.begin(); it != tooltips.end(); ++it) {
-		delete *it;
-	}
 	tooltips.clear();
 
 	if (light_drawer) {
@@ -270,31 +329,82 @@ void MapDrawer::Release() {
 }
 
 void MapDrawer::DrawScene() {
+	const auto started = std::chrono::steady_clock::now();
 	DrawBackground();
 	DrawMap();
-	if (options.isDrawLight()) {
+	if (canvas->IsIngamePreview()) {
+		DrawIngamePreviewPlayer();
+	}
+	if (options.isDrawLight() && !far_zoom_mode) {
 		DrawLight();
 	}
-	DrawDraggingShadow();
-	DrawHigherFloors();
+	if (!far_zoom_mode) {
+		DrawHigherFloors();
+	}
+	last_scene_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started).count();
 }
 
 void MapDrawer::DrawOverlays() {
+	DrawMinimapImportOverlay();
+	if (!far_zoom_mode) {
+		DrawDraggingShadow();
+	}
 	if (options.dragging) {
 		DrawSelectionBox();
 	}
 	DrawBrush();
-	if (options.show_grid && zoom <= 10.f) {
+	if (options.show_grid && !medium_zoom_mode && !far_zoom_mode) {
 		DrawGrid();
 	}
 	if (options.show_ingame_box) {
 		DrawIngameBox();
 	}
-	if (options.show_tooltips) {
+	if (options.show_tooltips && !medium_zoom_mode && !far_zoom_mode && !isViewportInteractionActive()) {
 		DrawTooltips();
+	}
+	for (int map_z = start_z; map_z >= superend_z; --map_z) {
+		DrawPositionIndicator(map_z);
 	}
 	if (options.show_performance_stats) {
 		DrawPerformanceStats();
+	}
+}
+
+void MapDrawer::DrawMinimapImportOverlay() {
+	if (!canvas->minimap_import_overlay) {
+		return;
+	}
+	const auto& document = *canvas->minimap_import_overlay;
+	const auto& bounds = document.getFloorInfo(floor).bounds;
+	if (!bounds.valid()) {
+		return;
+	}
+	const int firstY = std::max(start_y, bounds.minY);
+	const int lastY = std::min(end_y, bounds.maxY);
+	const int firstX = std::max(start_x, bounds.minX);
+	const int lastX = std::min(end_x, bounds.maxX);
+	for (int y = firstY; y <= lastY; ++y) {
+		for (int x = firstX; x <= lastX;) {
+			const MinimapTile* tile = document.getTile(x, y, floor);
+			if (!tile) {
+				++x;
+				continue;
+			}
+			const uint8_t color = tile->color;
+			int runEnd = x + 1;
+			while (runEnd <= lastX) {
+				const MinimapTile* next = document.getTile(runEnd, y, floor);
+				if (!next || next->color != color) {
+					break;
+				}
+				++runEnd;
+			}
+			const uint8_t red = static_cast<uint8_t>((color / 36) % 6 * 51);
+			const uint8_t green = static_cast<uint8_t>((color / 6) % 6 * 51);
+			const uint8_t blue = static_cast<uint8_t>(color % 6 * 51);
+			drawFilledRect(x * TileSize - view_scroll_x, y * TileSize - view_scroll_y, (runEnd - x) * TileSize, TileSize, wxColor(red, green, blue, canvas->minimap_import_overlay_opacity));
+			x = runEnd;
+		}
 	}
 }
 
@@ -302,34 +412,57 @@ void MapDrawer::markDirty() {
 	scene_dirty = true;
 }
 
+void MapDrawer::invalidateMinimapPages() {
+	minimap_page_cache.invalidateAll();
+}
+
 bool MapDrawer::isSceneDirty() {
-	if (options.show_preview) {
+	if (!input_view_initialized) {
+		input_view_initialized = true;
+		last_input_zoom = zoom;
+		last_input_scroll_x = view_scroll_x;
+		last_input_scroll_y = view_scroll_y;
+	} else if (last_input_zoom != zoom || last_input_scroll_x != view_scroll_x || last_input_scroll_y != view_scroll_y) {
+		last_input_zoom = zoom;
+		last_input_scroll_x = view_scroll_x;
+		last_input_scroll_y = view_scroll_y;
+		viewport_settle_timer.Start();
+		viewport_settle_pending = true;
+	}
+
+	const bool viewport_changed = cached_scene_zoom != zoom
+		|| cached_scroll_x != view_scroll_x
+		|| cached_scroll_y != view_scroll_y;
+	const bool hard_invalidation = !cached_scene_initialized
+		|| cached_floor != floor
+		|| cached_start_z != start_z
+		|| cached_screensize_x != screensize_x
+		|| cached_screensize_y != screensize_y
+		|| viewport_changed;
+	if (hard_invalidation) {
+		viewport_settle_pending = false;
 		return true;
 	}
-	if (scene_dirty
-		|| !prev_view_initialized
-		|| prev_view_scroll_x != view_scroll_x
-		|| prev_view_scroll_y != view_scroll_y
-		|| prev_zoom != zoom
-		|| prev_floor != floor
-		|| prev_start_z != start_z
-		|| prev_screensize_x != screensize_x
-		|| prev_screensize_y != screensize_y) {
-		prev_view_initialized = true;
-		prev_view_scroll_x = view_scroll_x;
-		prev_view_scroll_y = view_scroll_y;
-		prev_zoom = zoom;
-		prev_floor = floor;
-		prev_start_z = start_z;
-		prev_screensize_x = screensize_x;
-		prev_screensize_y = screensize_y;
-		return true;
+
+	if (isViewportInteractionActive()) {
+		return false;
 	}
-	return false;
+
+	viewport_settle_pending = false;
+	return scene_dirty
+		|| cached_scroll_x != view_scroll_x
+		|| cached_scroll_y != view_scroll_y
+		|| cached_scene_zoom != zoom;
+}
+
+bool MapDrawer::isViewportInteractionActive() const {
+	return viewport_settle_pending
+		&& cached_scene_initialized
+		&& viewport_settle_timer.Time() < VIEWPORT_SETTLE_DELAY_MS;
 }
 
 void MapDrawer::Draw() {
-	if (!options.use_fbo_scene_cache || options.show_preview) {
+	if (!options.use_fbo_scene_cache) {
 		DrawScene();
 		DrawOverlays();
 		return;
@@ -337,6 +470,7 @@ void MapDrawer::Draw() {
 
 	renderer->ensureFBO(screensize_x, screensize_y);
 	if (!renderer->hasFBO()) {
+		cached_scene_initialized = false;
 		DrawScene();
 		DrawOverlays();
 		return;
@@ -347,10 +481,40 @@ void MapDrawer::Draw() {
 		DrawScene();
 		renderer->flush();
 		renderer->endFBO();
-		scene_dirty = false;
+		const bool frameComplete = g_gui.gfx.isCurrentMapRenderComplete();
+		scene_dirty = !frameComplete && g_gui.gfx.hasPendingTextureWork();
+		cached_scene_initialized = true;
+		cached_scene_zoom = zoom;
+		cached_scroll_x = view_scroll_x;
+		cached_scroll_y = view_scroll_y;
+		cached_floor = floor;
+		cached_start_z = start_z;
+		cached_screensize_x = screensize_x;
+		cached_screensize_y = screensize_y;
 	}
 
-	renderer->blitFBO(screensize_x, screensize_y);
+	const double scale = cached_scene_zoom / zoom;
+	const double translated_x = static_cast<double>(cached_scroll_x - view_scroll_x) / zoom;
+	const double translated_y = static_cast<double>(cached_scroll_y - view_scroll_y) / zoom;
+	const int dst_left = static_cast<int>(std::lround(translated_x));
+	const int dst_top = static_cast<int>(std::lround(translated_y));
+	const int dst_right = static_cast<int>(std::lround(translated_x + screensize_x * scale));
+	const int dst_bottom = static_cast<int>(std::lround(translated_y + screensize_y * scale));
+
+	glClearColor(0.0f, 0.0f, 0.0f, 0.0f);
+	glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+	renderer->blitFBO(
+		0,
+		0,
+		screensize_x,
+		screensize_y,
+		dst_left,
+		screensize_y - dst_bottom,
+		dst_right,
+		screensize_y - dst_top,
+		(scale == 1.0 ? GL_NEAREST : GL_LINEAR),
+		options.post_process_effect
+	);
 	DrawOverlays();
 }
 
@@ -378,6 +542,10 @@ inline int getFloorAdjustment(int floor) {
 
 void MapDrawer::DrawMap() {
 	Brush* brush = g_gui.GetCurrentBrush();
+	if (!far_zoom_mode) {
+		visible_tile_count = 0;
+		visible_item_count = 0;
+	}
 
 	// The current house we're drawing
 	current_house_id = 0;
@@ -389,27 +557,20 @@ void MapDrawer::DrawMap() {
 		}
 	}
 
-	bool only_colors = options.isOnlyColors();
-	bool show_zone_tooltips = options.isTooltips();
-
-	// Enable texture mode
-	if (!only_colors) {
-		glEnable(GL_TEXTURE_2D);
+	bool show_zone_tooltips = options.isTooltips() && !far_zoom_mode;
+	if (far_zoom_mode) {
+		DrawMapMinimapPages();
+		return;
 	}
+
+	// Note: texture mode is controlled by uUseTexture in the shader
 
 	for (int map_z = start_z; map_z >= superend_z; map_z--) {
 		if (map_z == end_z && start_z != end_z && options.show_shade) {
 			// Draw shade
-			if (!only_colors) {
-				glDisable(GL_TEXTURE_2D);
-			}
 
 			renderer->drawColoredQuad(0.0f, 0.0f, static_cast<float>(screensize_x) * zoom, static_cast<float>(screensize_y) * zoom, { 0, 0, 0, 128 });
 			renderer->flush();
-
-			if (!only_colors) {
-				glEnable(GL_TEXTURE_2D);
-			}
 		}
 
 		if (map_z >= end_z) {
@@ -431,7 +592,7 @@ void MapDrawer::DrawMap() {
 							TileLocation* location = nd->getTile(map_x, map_y, map_z);
 							DrawTile(location);
 							// draw light, but only if not zoomed too far
-							if (location && options.isDrawLight() && zoom <= 10.0) {
+							if (location && options.isDrawLight()) {
 								AddLight(location);
 							}
 						}
@@ -486,14 +647,9 @@ void MapDrawer::DrawMap() {
 			}
 		}
 
-		DrawPositionIndicator(map_z);
-
-		if (only_colors) {
-			glEnable(GL_TEXTURE_2D);
-		}
-
 		// Draws the doodad preview or the paste preview (or import preview)
-		if (g_gui.secondary_map != nullptr && !options.ingame) {
+		if (g_gui.secondary_map != nullptr && !options.ingame && !far_zoom_mode) {
+			const bool autoborderPreview = g_autoborder_preview.Owns(g_gui.secondary_map);
 			Position normalPos;
 			Position to(mouse_map_x, mouse_map_y, floor);
 
@@ -506,13 +662,19 @@ void MapDrawer::DrawMap() {
 			for (int map_x = start_x; map_x <= end_x; map_x++) {
 				for (int map_y = start_y; map_y <= end_y; map_y++) {
 					Position final(map_x, map_y, map_z);
-					Position pos = normalPos + final - to;
+					Position pos = autoborderPreview ? final : normalPos + final - to;
 					// Position pos = topos + copypos - Position(map_x, map_y, map_z);
 					if (pos.z >= MAP_LAYERS || pos.z < 0) {
 						continue;
 					}
 
 					Tile* tile = g_gui.secondary_map->getTile(pos);
+					if (autoborderPreview && g_autoborder_preview.IsDeletion(final)) {
+						const int offset = map_z <= GROUND_LAYER ? (GROUND_LAYER - map_z) * TileSize : TileSize * (floor - map_z);
+						const int draw_x = ((map_x * TileSize) - view_scroll_x) - offset;
+						const int draw_y = ((map_y * TileSize) - view_scroll_y) - offset;
+						drawFilledRect(draw_x, draw_y, TileSize, TileSize, wxColour(220, 45, 45, 110));
+					}
 					if (tile) {
 						// Compensate for underground/overground
 						int offset;
@@ -527,6 +689,7 @@ void MapDrawer::DrawMap() {
 
 						// Draw ground
 						uint8_t r = 160, g = 160, b = 160;
+						uint8_t ground_alpha = 160;
 						if (tile->ground) {
 							if (tile->isBlocking() && options.show_blocking) {
 								g = g / 3 * 2;
@@ -554,22 +717,15 @@ void MapDrawer::DrawMap() {
 								g /= 2;
 							}
 							if (options.show_zone_areas && tile->hasZone()) {
-								size_t zones = tile->zones.size();
-								uint16_t r16 = 0, g16 = 0, b16 = 0;
-								for (const auto& zoneId : tile->zones) {
-									const uint16_t colorIndex = zoneId % colors.size();
-									const Color& colour = colors.at(colorIndex);
-
-									r16 += std::get<0>(colour);
-									g16 += std::get<1>(colour);
-									b16 += std::get<2>(colour);
+								const Color colour = GetZoneColor(*tile, options.active_zone_id);
+								r = std::get<0>(colour);
+								g = std::get<1>(colour);
+								b = std::get<2>(colour);
+								if (options.active_zone_id != 0 && tile->hasZone(options.active_zone_id)) {
+									ground_alpha = 220;
 								}
-
-								r = r16 / zones;
-								g = g16 / zones;
-								b = b16 / zones;
 							}
-							BlitItem(draw_x, draw_y, tile, tile->ground, true, r, g, b, 160);
+							BlitItem(draw_x, draw_y, tile, tile->ground, true, r, g, b, ground_alpha);
 						}
 
 						// Draw items on the tile
@@ -596,10 +752,69 @@ void MapDrawer::DrawMap() {
 		++end_x;
 		++end_y;
 	}
+}
 
-	if (!only_colors) {
-		glEnable(GL_TEXTURE_2D);
+void MapDrawer::DrawMapMinimapPages() {
+	minimap_page_cache.bindMap(&editor.map);
+	minimap_page_cache.beginVisibleFrame();
+	const uint64_t styleKey = static_cast<uint64_t>(options.show_only_modified)
+		| (static_cast<uint64_t>(options.show_zone_areas) << 1)
+		| (static_cast<uint64_t>(options.show_houses) << 2)
+		| (static_cast<uint64_t>(options.show_special_tiles) << 3)
+		| (static_cast<uint64_t>(options.active_zone_id) << 8)
+		| (static_cast<uint64_t>(current_house_id) << 40);
+
+	const auto resolvePixel = [this](const Tile& tile) -> GLColor {
+		if (options.show_only_modified && !tile.isModified()) {
+			return { 0, 0, 0, 0 };
+		}
+		const uint8_t color = tile.getMiniMapColor();
+		uint8_t red = static_cast<uint8_t>((color / 36) % 6 * 51);
+		uint8_t green = static_cast<uint8_t>((color / 6) % 6 * 51);
+		uint8_t blue = static_cast<uint8_t>(color % 6 * 51);
+		if (options.show_zone_areas && tile.hasZone()) {
+			const Color zoneColor = GetZoneColor(tile, options.active_zone_id);
+			red = static_cast<uint8_t>(std::get<0>(zoneColor));
+			green = static_cast<uint8_t>(std::get<1>(zoneColor));
+			blue = static_cast<uint8_t>(std::get<2>(zoneColor));
+		} else if (options.show_houses && tile.isHouseTile()) {
+			red = static_cast<uint8_t>(red / 2);
+			if (tile.getHouseID() != current_house_id) {
+				green = static_cast<uint8_t>(green / 2);
+			}
+		} else if (options.show_special_tiles && tile.isPZ()) {
+			red = static_cast<uint8_t>(red / 2);
+			blue = static_cast<uint8_t>(blue / 2);
+		}
+		return { red, green, blue, 255 };
+	};
+
+	for (int mapZ = start_z; mapZ >= superend_z; --mapZ) {
+		if (mapZ == end_z && start_z != end_z && options.show_shade) {
+			renderer->drawColoredQuad(0.0f, 0.0f, static_cast<float>(screensize_x) * zoom, static_cast<float>(screensize_y) * zoom, { 0, 0, 0, 128 });
+			renderer->flush();
+		}
+		if (mapZ >= end_z) {
+			minimap_page_cache.drawVisible(
+				*renderer,
+				mapZ,
+				start_x,
+				start_y,
+				end_x,
+				end_y,
+				view_scroll_x,
+				view_scroll_y,
+				getFloorAdjustment(mapZ),
+				styleKey,
+				resolvePixel
+			);
+		}
+		--start_x;
+		--start_y;
+		++end_x;
+		++end_y;
 	}
+	minimap_page_cache.endVisibleFrame(*renderer);
 }
 
 void MapDrawer::DrawIngameBox() {
@@ -614,8 +829,6 @@ void MapDrawer::DrawIngameBox() {
 	int box_end_y = box_start_y + ClientMapHeight * TileSize;
 
 	static wxColor side_color(0, 0, 0, 200);
-
-	glDisable(GL_TEXTURE_2D);
 
 	// left side
 	if (box_start_x > 0) {
@@ -644,23 +857,21 @@ void MapDrawer::DrawIngameBox() {
 	}
 
 	// hidden tiles
-	drawRect(box_start_x, box_start_y, box_end_x - box_start_x, box_end_y - box_start_y, *wxRED, zoom);
+	drawRect(box_start_x, box_start_y, box_end_x - box_start_x, box_end_y - box_start_y, *wxRED);
 
 	// visible tiles
 	box_start_x += TileSize;
 	box_start_y += TileSize;
 	box_end_x -= 1 * TileSize;
 	box_end_y -= 1 * TileSize;
-	drawRect(box_start_x, box_start_y, box_end_x - box_start_x, box_end_y - box_start_y, *wxGREEN, zoom);
+	drawRect(box_start_x, box_start_y, box_end_x - box_start_x, box_end_y - box_start_y, *wxGREEN);
 
 	// player position
 	box_start_x += (ClientMapWidth - 3) / 2 * TileSize;
 	box_start_y += (ClientMapHeight - 3) / 2 * TileSize;
 	box_end_x = box_start_x + TileSize;
 	box_end_y = box_start_y + TileSize;
-	drawRect(box_start_x, box_start_y, box_end_x - box_start_x, box_end_y - box_start_y, *wxGREEN, zoom);
-
-	glEnable(GL_TEXTURE_2D);
+	drawRect(box_start_x, box_start_y, box_end_x - box_start_x, box_end_y - box_start_y, *wxGREEN);
 }
 
 void MapDrawer::DrawGrid() {
@@ -685,12 +896,10 @@ void MapDrawer::DrawGrid() {
 
 	if (!lines.empty()) {
 		renderer->drawLines(lines.data(), static_cast<int>(lines.size() / 4), 255, 255, 255, 128, 1.0f);
-		renderer->flush();
 	}
 }
 
 void MapDrawer::DrawDraggingShadow() {
-	glEnable(GL_TEXTURE_2D);
 
 	// Draw dragging shadow
 	if (!editor.selection.isBusy() && dragging && !options.ingame) {
@@ -746,12 +955,9 @@ void MapDrawer::DrawDraggingShadow() {
 			}
 		}
 	}
-
-	glDisable(GL_TEXTURE_2D);
 }
 
 void MapDrawer::DrawHigherFloors() {
-	glEnable(GL_TEXTURE_2D);
 
 	// Draw "transparent higher floor"
 	if (floor != 8 && floor != 0 && options.transparent_floors) {
@@ -789,8 +995,6 @@ void MapDrawer::DrawHigherFloors() {
 			}
 		}
 	}
-
-	glDisable(GL_TEXTURE_2D);
 }
 
 void MapDrawer::DrawSelectionBox() {
@@ -899,7 +1103,6 @@ void MapDrawer::DrawBrush() {
 			}
 		} else {
 			if (brush->isRaw()) {
-				glEnable(GL_TEXTURE_2D);
 			}
 
 			if (g_gui.GetBrushShape() == BRUSHSHAPE_SQUARE || brush->isSpawn() /* Spawn brush is always square */) {
@@ -1008,7 +1211,6 @@ void MapDrawer::DrawBrush() {
 			}
 
 			if (brush->isRaw()) {
-				glDisable(GL_TEXTURE_2D);
 			}
 		}
 	} else {
@@ -1047,7 +1249,6 @@ void MapDrawer::DrawBrush() {
 			glColorCheck(brush, Position(mouse_map_x, mouse_map_y, floor));
 			glFillQuad(cx, cy + TileSize, cx + TileSize, cy + TileSize, cx + TileSize, cy, cx, cy);
 		} else if (brush->isCreature()) {
-			glEnable(GL_TEXTURE_2D);
 			int cy = (mouse_map_y)*TileSize - view_scroll_y - getFloorAdjustment(floor);
 			int cx = (mouse_map_x)*TileSize - view_scroll_x - getFloorAdjustment(floor);
 			CreatureBrush* creature_brush = brush->asCreature();
@@ -1056,11 +1257,9 @@ void MapDrawer::DrawBrush() {
 			} else {
 				BlitCreature(cx, cy, creature_brush->getType()->outfit, SOUTH, 255, 64, 64, 160);
 			}
-			glDisable(GL_TEXTURE_2D);
 		} else if (!brush->isDoodad()) {
 			RAWBrush* raw_brush = nullptr;
 			if (brush->isRaw()) { // Textured brush
-				glEnable(GL_TEXTURE_2D);
 				raw_brush = brush->asRaw();
 			}
 
@@ -1114,7 +1313,6 @@ void MapDrawer::DrawBrush() {
 			}
 
 			if (brush->isRaw()) { // Textured brush
-				glDisable(GL_TEXTURE_2D);
 			}
 		}
 	}
@@ -1237,22 +1435,63 @@ void MapDrawer::BlitItem(int& draw_x, int& draw_y, const Position& pos, Item* it
 		alpha /= 2;
 	}
 
-	auto* podium = dynamic_cast<Podium*>(item);
-	if (it.isPodium() && !podium->hasShowPlatform() && !options.ingame) {
-		if (options.show_tech_items) {
-			alpha /= 2;
-		} else {
-			alpha = 0;
+	Podium* podium = nullptr;
+	if (it.isPodium()) {
+		podium = static_cast<Podium*>(item);
+		if (!podium->hasShowPlatform() && !options.ingame) {
+			if (options.show_tech_items) {
+				alpha /= 2;
+			} else {
+				alpha = 0;
+			}
 		}
 	}
 
-	int frame = item->getFrame();
-	for (int cx = 0; cx != spr->width; cx++) {
-		for (int cy = 0; cy != spr->height; cy++) {
-			for (int cf = 0; cf != spr->layers; cf++) {
-				auto st = spr->getSpriteTex(cx, cy, cf, subtype, pattern_x, pattern_y, pattern_z, frame);
-				glBlitTexture(screenx - cx * TileSize, screeny - cy * TileSize, st.texture, red, green, blue, alpha, false, st.u0, st.v0, st.u1, st.v1);
+	const int requestedFrame = item->getFrame();
+	if (spr->width == 1 && spr->height == 1 && spr->layers == 1) {
+		auto st = spr->getSpriteTex(0, 0, 0, subtype, pattern_x, pattern_y, pattern_z, requestedFrame);
+		if (st.texture != 0) {
+			item->setLastReadyFrame(requestedFrame);
+		} else {
+			const int lastReadyFrame = item->getLastReadyFrame();
+			if (lastReadyFrame < 0 || lastReadyFrame == requestedFrame) {
+				return;
 			}
+			st = spr->getSpriteTex(0, 0, 0, subtype, pattern_x, pattern_y, pattern_z, lastReadyFrame);
+			if (st.texture == 0) {
+				return;
+			}
+		}
+		glBlitTexture(screenx, screeny, st.texture, red, green, blue, alpha, false, st.u0, st.v0, st.u1, st.v1);
+	} else {
+		std::vector<PreparedSpritePart> parts;
+		auto prepareFrame = [&](int requestedFrameToPrepare) {
+			parts.clear();
+			return AppendPreparedSpriteParts(
+				screenx,
+				screeny,
+				spr->width,
+				spr->height,
+				spr->layers,
+				[&](int cx, int cy, int layer) {
+					return spr->getSpriteTex(cx, cy, layer, subtype, pattern_x, pattern_y, pattern_z, requestedFrameToPrepare);
+				},
+				parts
+			);
+		};
+
+		if (prepareFrame(requestedFrame)) {
+			item->setLastReadyFrame(requestedFrame);
+		} else {
+			const int lastReadyFrame = item->getLastReadyFrame();
+			if (lastReadyFrame < 0 || lastReadyFrame == requestedFrame || !prepareFrame(lastReadyFrame)) {
+				return;
+			}
+		}
+
+		for (const PreparedSpritePart& part : parts) {
+			const auto& st = part.texture;
+			glBlitTexture(part.screen_x, part.screen_y, st.texture, red, green, blue, alpha, false, st.u0, st.v0, st.u1, st.v1);
 		}
 	}
 
@@ -1261,7 +1500,7 @@ void MapDrawer::BlitItem(int& draw_x, int& draw_y, const Position& pos, Item* it
 		return;
 	}
 
-	if (it.isPodium()) {
+	if (podium) {
 		Outfit outfit = podium->getOutfit();
 		if (!podium->hasShowOutfit()) {
 			if (podium->hasShowMount()) {
@@ -1300,31 +1539,14 @@ void MapDrawer::BlitItem(int& draw_x, int& draw_y, const Position& pos, Item* it
 
 			int startOffset = std::max<int>(16, 32 - light.intensity);
 			int sqSize = TileSize - startOffset;
-			glDisable(GL_TEXTURE_2D);
 			glBlitSquare(draw_x + startOffset - 2, draw_y + startOffset - 2, 0, 0, 0, byteA, sqSize + 2);
 			glBlitSquare(draw_x + startOffset - 1, draw_y + startOffset - 1, byteR, byteG, byteB, byteA, sqSize);
-			glEnable(GL_TEXTURE_2D);
 		}
 	}
 }
 
 void MapDrawer::BlitSpriteType(int screenx, int screeny, uint32_t spriteid, int red, int green, int blue, int alpha) {
-	GameSprite* spr = g_items[spriteid].sprite;
-	if (spr == nullptr) {
-		return;
-	}
-	screenx -= spr->getDrawOffset().first;
-	screeny -= spr->getDrawOffset().second;
-
-	int tme = 0; // GetTime() % itype->FPA;
-	for (int cx = 0; cx != spr->width; ++cx) {
-		for (int cy = 0; cy != spr->height; ++cy) {
-			for (int cf = 0; cf != spr->layers; ++cf) {
-				auto st = spr->getSpriteTex(cx, cy, cf, -1, 0, 0, 0, tme);
-				glBlitTexture(screenx - cx * TileSize, screeny - cy * TileSize, st.texture, red, green, blue, alpha, false, st.u0, st.v0, st.u1, st.v1);
-			}
-		}
-	}
+	BlitSpriteType(screenx, screeny, g_items[spriteid].sprite, red, green, blue, alpha);
 }
 
 void MapDrawer::BlitSpriteType(int screenx, int screeny, GameSprite* spr, int red, int green, int blue, int alpha) {
@@ -1334,18 +1556,37 @@ void MapDrawer::BlitSpriteType(int screenx, int screeny, GameSprite* spr, int re
 	screenx -= spr->getDrawOffset().first;
 	screeny -= spr->getDrawOffset().second;
 
-	int tme = 0; // GetTime() % itype->FPA;
-	for (int cx = 0; cx != spr->width; ++cx) {
-		for (int cy = 0; cy != spr->height; ++cy) {
-			for (int cf = 0; cf != spr->layers; ++cf) {
-				auto st = spr->getSpriteTex(cx, cy, cf, -1, 0, 0, 0, tme);
-				glBlitTexture(screenx - cx * TileSize, screeny - cy * TileSize, st.texture, red, green, blue, alpha, false, st.u0, st.v0, st.u1, st.v1);
-			}
+	const int frame = 0; // GetTime() % itype->FPA;
+	if (spr->width == 1 && spr->height == 1 && spr->layers == 1) {
+		const auto st = spr->getSpriteTex(0, 0, 0, -1, 0, 0, 0, frame);
+		if (st.texture != 0) {
+			glBlitTexture(screenx, screeny, st.texture, red, green, blue, alpha, false, st.u0, st.v0, st.u1, st.v1);
 		}
+		return;
+	}
+
+	std::vector<PreparedSpritePart> parts;
+	const bool complete = AppendPreparedSpriteParts(
+		screenx,
+		screeny,
+		spr->width,
+		spr->height,
+		spr->layers,
+		[&](int cx, int cy, int layer) {
+			return spr->getSpriteTex(cx, cy, layer, -1, 0, 0, 0, frame);
+		},
+		parts
+	);
+	if (!complete) {
+		return;
+	}
+	for (const PreparedSpritePart& part : parts) {
+		const auto& st = part.texture;
+		glBlitTexture(part.screen_x, part.screen_y, st.texture, red, green, blue, alpha, false, st.u0, st.v0, st.u1, st.v1);
 	}
 }
 
-void MapDrawer::BlitCreature(int screenx, int screeny, const Outfit& outfit, Direction dir, int red, int green, int blue, int alpha) {
+void MapDrawer::BlitCreature(int screenx, int screeny, const Outfit& outfit, Direction dir, int red, int green, int blue, int alpha, int animationFrame) {
 	if (outfit.lookItem != 0) {
 		ItemType& it = g_items[outfit.lookItem];
 		BlitSpriteType(screenx, screeny, it.sprite, red, green, blue, alpha);
@@ -1356,7 +1597,9 @@ void MapDrawer::BlitCreature(int screenx, int screeny, const Outfit& outfit, Dir
 			return;
 		}
 
-		int tme = 0; // GetTime() % itype->FPA;
+		const int frame = spr->frames == 0 ? 0 : animationFrame % spr->frames;
+		std::vector<PreparedSpritePart> parts;
+		bool complete = true;
 
 		// mount and addon drawing thanks to otc code
 		// mount colors by Zbizu
@@ -1371,12 +1614,19 @@ void MapDrawer::BlitCreature(int screenx, int screeny, const Outfit& outfit, Dir
 				mountOutfit.lookLegs = outfit.lookMountLegs;
 				mountOutfit.lookFeet = outfit.lookMountFeet;
 
-				for (int cx = 0; cx != mountSpr->width; ++cx) {
-					for (int cy = 0; cy != mountSpr->height; ++cy) {
-						auto st = mountSpr->getSpriteTex(cx, cy, (int)dir, 0, 0, mountOutfit, tme);
-						glBlitTexture(screenx - cx * TileSize, screeny - cy * TileSize, st.texture, red, green, blue, alpha, false, st.u0, st.v0, st.u1, st.v1);
-					}
-				}
+				complete = AppendPreparedSpriteParts(
+							   screenx,
+							   screeny,
+							   mountSpr->width,
+							   mountSpr->height,
+							   1,
+							   [&](int cx, int cy, int) {
+								   const int mountFrame = mountSpr->frames == 0 ? 0 : animationFrame % mountSpr->frames;
+								   return mountSpr->getSpriteTex(cx, cy, static_cast<int>(dir), 0, 0, mountOutfit, mountFrame);
+							   },
+							   parts
+						   )
+					&& complete;
 
 				pattern_z = std::min<int>(1, spr->pattern_z - 1);
 			}
@@ -1390,14 +1640,67 @@ void MapDrawer::BlitCreature(int screenx, int screeny, const Outfit& outfit, Dir
 				continue;
 			}
 
-			for (int cx = 0; cx != spr->width; ++cx) {
-				for (int cy = 0; cy != spr->height; ++cy) {
-					auto st = spr->getSpriteTex(cx, cy, (int)dir, pattern_y, pattern_z, outfit, tme);
-					glBlitTexture(screenx - cx * TileSize, screeny - cy * TileSize, st.texture, red, green, blue, alpha, false, st.u0, st.v0, st.u1, st.v1);
-				}
-			}
+			complete = AppendPreparedSpriteParts(
+						   screenx,
+						   screeny,
+						   spr->width,
+						   spr->height,
+						   1,
+						   [&](int cx, int cy, int) {
+							   return spr->getSpriteTex(cx, cy, static_cast<int>(dir), pattern_y, pattern_z, outfit, frame);
+						   },
+						   parts
+					   )
+				&& complete;
+		}
+
+		if (!complete) {
+			return;
+		}
+		for (const PreparedSpritePart& part : parts) {
+			const auto& st = part.texture;
+			glBlitTexture(part.screen_x, part.screen_y, st.texture, red, green, blue, alpha, false, st.u0, st.v0, st.u1, st.v1);
 		}
 	}
+}
+
+void MapDrawer::DrawIngamePreviewPlayer() {
+	const Position& position = canvas->ingamePreviewPlayerPosition;
+	if (!position.isValid() || position.z != floor) {
+		return;
+	}
+
+	const int floorOffset = position.z <= GROUND_LAYER ? (GROUND_LAYER - position.z) * TileSize : TileSize * (floor - position.z);
+	const int drawX = position.x * TileSize - view_scroll_x - floorOffset + canvas->ingamePreviewWalkOffsetX;
+	const int drawY = position.y * TileSize - view_scroll_y - floorOffset + canvas->ingamePreviewWalkOffsetY;
+
+	drawRect(drawX + 2, drawY + 2, TileSize - 4, TileSize - 4, wxColour(70, 210, 255, 190), 1);
+	BlitCreature(drawX, drawY, canvas->ingamePreviewPlayerOutfit, canvas->ingamePreviewPlayerDirection, 255, 255, 255, 255, canvas->ingamePreviewAnimationFrame);
+
+	const int centerX = drawX + TileSize / 2;
+	const int centerY = drawY + TileSize / 2;
+	int tipX = centerX;
+	int tipY = centerY;
+	switch (canvas->ingamePreviewPlayerDirection) {
+		case NORTH:
+			tipY -= 12;
+			break;
+		case EAST:
+			tipX += 12;
+			break;
+		case SOUTH:
+			tipY += 12;
+			break;
+		case WEST:
+			tipX -= 12;
+			break;
+		default:
+			break;
+	}
+	const float directionLine[] = {
+		static_cast<float>(centerX), static_cast<float>(centerY), static_cast<float>(tipX), static_cast<float>(tipY)
+	};
+	renderer->drawLines(directionLine, 1, 70, 210, 255, 230, 2.0f);
 }
 
 void MapDrawer::BlitCreature(int screenx, int screeny, const Creature* c, int red, int green, int blue, int alpha) {
@@ -1553,13 +1856,16 @@ void MapDrawer::DrawTile(TileLocation* location) {
 		return;
 	}
 
+	++visible_tile_count;
+	visible_item_count += tile->items.size() + (tile->ground ? 1u : 0u) + (tile->creature ? 1u : 0u);
+
 	int map_x = location->getX();
 	int map_y = location->getY();
 	int map_z = location->getZ();
 
 	bool as_minimap = options.show_as_minimap;
 	bool only_colors = options.isOnlyColors();
-	bool show_tooltips = options.isTooltips();
+	bool show_tooltips = options.isTooltips() && !medium_zoom_mode;
 	bool draw_waypoints = !only_colors && zoom < 10.0 && !options.ingame && options.show_waypoints;
 
 	Waypoint* waypoint = nullptr;
@@ -1637,20 +1943,10 @@ void MapDrawer::DrawTile(TileLocation* location) {
 		}
 
 		if (options.show_zone_areas && tile->hasZone()) {
-			size_t zones = tile->zones.size();
-			uint16_t r16 = 0, g16 = 0, b16 = 0;
-			for (const auto& zoneId : tile->zones) {
-				const uint16_t colorIndex = zoneId % colors.size();
-				const Color& colour = colors.at(colorIndex);
-
-				r16 += std::get<0>(colour);
-				g16 += std::get<1>(colour);
-				b16 += std::get<2>(colour);
-			}
-
-			r = r16 / zones;
-			g = g16 / zones;
-			b = b16 / zones;
+			const Color colour = GetZoneColor(*tile, options.active_zone_id);
+			r = std::get<0>(colour);
+			g = std::get<1>(colour);
+			b = std::get<2>(colour);
 		}
 	}
 
@@ -1685,6 +1981,9 @@ void MapDrawer::DrawTile(TileLocation* location) {
 		if (zoom < 10.0 || !options.hide_items_when_zoomed) {
 			// items on tile
 			for (auto it = tile->items.begin(); it != tile->items.end(); it++) {
+				if (medium_zoom_mode && !(*it)->isBorder() && std::next(it) != tile->items.end()) {
+					continue;
+				}
 				// item tooltip
 				if (show_tooltips && map_z == floor) {
 					WriteTooltip(tile, *it, tooltip, tile->isHouseTile());
@@ -1713,12 +2012,12 @@ void MapDrawer::DrawTile(TileLocation* location) {
 				}
 			}
 			// monster/npc on tile
-			if (tile->creature && options.show_creatures) {
+			if (!medium_zoom_mode && tile->creature && options.show_creatures) {
 				BlitCreature(draw_x, draw_y, tile->creature);
 			}
 		}
 
-		if (zoom < 10.0) {
+		if (!medium_zoom_mode && zoom < 10.0) {
 			// waypoint (blue flame)
 			if (draw_waypoints && waypoint) {
 				BlitSpriteType(draw_x, draw_y, SPRITE_WAYPOINT, 64, 64, 255);
@@ -1792,7 +2091,6 @@ void MapDrawer::DrawBrushIndicator(int x, int y, Brush* brush, uint8_t r, uint8_
 			fan.push_back(sin(angle) * (TileSize / 2) + y);
 		}
 		renderer->drawTriangleFan(fan.data(), static_cast<int>(fan.size() / 2), 0x00, 0x00, 0x00, 0x50);
-		renderer->flush();
 	}
 
 	// background
@@ -1804,7 +2102,6 @@ void MapDrawer::DrawBrushIndicator(int x, int y, Brush* brush, uint8_t r, uint8_
 			poly.push_back(static_cast<float>(vertexes[i][1] + y));
 		}
 		renderer->drawPolygon(poly.data(), 8, r, g, b, 0xB4);
-		renderer->flush();
 	}
 
 	// borders
@@ -1818,7 +2115,6 @@ void MapDrawer::DrawBrushIndicator(int x, int y, Brush* brush, uint8_t r, uint8_
 			seg.push_back(static_cast<float>(vertexes[i + 1][1] + y));
 		}
 		renderer->drawLines(seg.data(), 8, 0x00, 0x00, 0x00, 0xB4, 1.0f);
-		renderer->flush();
 	}
 }
 
@@ -1835,7 +2131,6 @@ void MapDrawer::DrawHookIndicator(int x, int y, const ItemType& type) {
 	}
 	if (!v.empty()) {
 		renderer->drawPolygon(v.data(), 4, 0, 0, 255, 200);
-		renderer->flush();
 	}
 }
 
@@ -1871,16 +2166,14 @@ void MapDrawer::DrawPositionIndicator(int z) {
 	const int size = static_cast<int>(TileSize * (0.3f + std::abs(500 - time % 1000) / 1000.f));
 	const int borderOffset = (TileSize - size) / 2;
 
-	glDisable(GL_TEXTURE_2D);
 	drawRect(x + borderOffset + 2, y + borderOffset + 2, size - 4, size - 4, *wxWHITE, 2);
 	drawRect(x + borderOffset + 1, y + borderOffset + 1, size - 2, size - 2, *wxBLACK, 2);
-	glEnable(GL_TEXTURE_2D);
 }
 
 void MapDrawer::DrawTooltips() {
-	for (std::vector<MapTooltip*>::const_iterator it = tooltips.begin(); it != tooltips.end(); ++it) {
-		MapTooltip* tooltip = (*it);
-		const char* text = tooltip->text.c_str();
+	for (auto it = tooltips.cbegin(); it != tooltips.cend(); ++it) {
+		const MapTooltip& tip = *it;
+		const char* text = tip.text.c_str();
 		float line_width = 0.0f;
 		float width = 2.0f;
 		float height = 14.0f;
@@ -1899,7 +2192,7 @@ void MapDrawer::DrawTooltips() {
 			char_count++;
 			line_char_count++;
 
-			if (tooltip->ellipsis && char_count > (MapTooltip::MAX_CHARS + 3)) {
+			if (tip.ellipsis && char_count > (MapTooltip::MAX_CHARS + 3)) {
 				break;
 			}
 		}
@@ -1909,8 +2202,8 @@ void MapDrawer::DrawTooltips() {
 		width = (width + 8.0f) * scale;
 		height = (height + 4.0f) * scale;
 
-		float x = tooltip->x + (TileSize / 2.0f);
-		float y = tooltip->y;
+		float x = tip.x + (TileSize / 2.0f);
+		float y = tip.y;
 		float center = width / 2.0f;
 		float space = (7.0f * scale);
 		float startx = x - center;
@@ -1944,16 +2237,15 @@ void MapDrawer::DrawTooltips() {
 				poly[i * 2 + 1] = vertexes[i][1];
 			}
 			renderer->drawPolygon(poly, 8, background.Red(), background.Green(), background.Blue(), 245);
-			renderer->flush();
 		}
 
 		// borders
 		{
 			const wxColour themedBorder = Theme::Get(Theme::Role::TooltipBorder);
-			const bool defaultBorder = tooltip->r == 255 && tooltip->g == 255 && tooltip->b == 255;
-			const uint8_t borderR = defaultBorder ? themedBorder.Red() : tooltip->r;
-			const uint8_t borderG = defaultBorder ? themedBorder.Green() : tooltip->g;
-			const uint8_t borderB = defaultBorder ? themedBorder.Blue() : tooltip->b;
+			const bool defaultBorder = tip.r == 255 && tip.g == 255 && tip.b == 255;
+			const uint8_t borderR = defaultBorder ? themedBorder.Red() : tip.r;
+			const uint8_t borderG = defaultBorder ? themedBorder.Green() : tip.g;
+			const uint8_t borderB = defaultBorder ? themedBorder.Blue() : tip.b;
 			float seg[32];
 			for (int i = 0; i < 8; ++i) {
 				seg[i * 4] = vertexes[i][0];
@@ -1962,7 +2254,6 @@ void MapDrawer::DrawTooltips() {
 				seg[i * 4 + 3] = vertexes[i + 1][1];
 			}
 			renderer->drawLines(seg, 8, borderR, borderG, borderB, 255, 1.5f);
-			renderer->flush();
 		}
 
 		// text
@@ -1990,7 +2281,7 @@ void MapDrawer::DrawTooltips() {
 				char_count++;
 				line_char_count++;
 
-				if (tooltip->ellipsis && char_count >= MapTooltip::MAX_CHARS) {
+				if (tip.ellipsis && char_count >= MapTooltip::MAX_CHARS) {
 					drawBitmapChar(rme_bitmap_helvetica_18, '.');
 					if (char_count >= (MapTooltip::MAX_CHARS + 2)) {
 						break;
@@ -2018,9 +2309,8 @@ void MapDrawer::MakeTooltip(int screenx, int screeny, const std::string& text, u
 		return;
 	}
 
-	auto* tooltip = newd MapTooltip(screenx, screeny, text, r, g, b);
-	tooltip->checkLineEnding();
-	tooltips.push_back(tooltip);
+	tooltips.emplace_back(screenx, screeny, text, r, g, b);
+	tooltips.back().checkLineEnding();
 }
 
 void MapDrawer::AddLight(TileLocation* location) {
@@ -2072,7 +2362,7 @@ void MapDrawer::TakeScreenshot(uint8_t* screenshot_buffer) {
 	glPixelStorei(GL_PACK_ALIGNMENT, 1); // 1 byte alignment
 
 	for (int i = 0; i < screensize_y; ++i) {
-		glReadPixels(0, screensize_y - i, screensize_x, 1, GL_RGB, GL_UNSIGNED_BYTE, (GLubyte*)(screenshot_buffer) + 3 * screensize_x * i);
+		glReadPixels(0, screensize_y - i - 1, screensize_x, 1, GL_RGB, GL_UNSIGNED_BYTE, (GLubyte*)(screenshot_buffer) + 3 * screensize_x * i);
 	}
 }
 
@@ -2164,8 +2454,8 @@ void MapDrawer::glColorCheck(Brush* brush, const Position& pos) {
 	}
 }
 
-void MapDrawer::drawRect(int x, int y, int w, int h, const wxColor& color, float width) {
-	renderer->drawRect(static_cast<float>(x), static_cast<float>(y), static_cast<float>(w), static_cast<float>(h), { color.Red(), color.Green(), color.Blue(), color.Alpha() }, width);
+void MapDrawer::drawRect(int x, int y, int w, int h, const wxColor& color, int width) {
+	renderer->drawRect(static_cast<float>(x), static_cast<float>(y), static_cast<float>(w), static_cast<float>(h), { color.Red(), color.Green(), color.Blue(), color.Alpha() }, static_cast<float>(width));
 }
 
 void MapDrawer::drawFilledRect(int x, int y, int w, int h, const wxColor& color) {
@@ -2212,8 +2502,7 @@ void MapDrawer::UpdateCPUUsage() {
 
 	if (last_now_time.QuadPart != 0) {
 		auto process_diff = static_cast<double>(
-			(sys.QuadPart - last_sys_time.QuadPart) +
-			(user.QuadPart - last_cpu_time.QuadPart)
+			(sys.QuadPart - last_sys_time.QuadPart) + (user.QuadPart - last_cpu_time.QuadPart)
 		);
 		auto system_diff = static_cast<double>(now.QuadPart - last_now_time.QuadPart);
 
@@ -2251,9 +2540,7 @@ void MapDrawer::UpdateCPUUsage() {
 
 	unsigned long long utime;
 	unsigned long long stime;
-	int fields = sscanf(ptr + 2,
-		"%*c %*d %*d %*d %*d %*d %*u %*u %*u %*u %*u %llu %llu",
-		&utime, &stime);
+	int fields = sscanf(ptr + 2, "%*c %*d %*d %*d %*d %*d %*u %*u %*u %*u %*u %llu %llu", &utime, &stime);
 
 	if (fields != 2) {
 		return;
@@ -2285,14 +2572,6 @@ void MapDrawer::UpdateCPUUsage() {
 #endif
 }
 
-std::string MapDrawer::FormatPerformanceStats() const {
-	std::ostringstream oss;
-	oss << "FPS: " << std::fixed << std::setprecision(1) << current_fps
-		<< " | CPU: " << std::fixed << std::setprecision(1) << current_cpu << "%"
-		<< " | RAM: " << current_ram << " MB";
-	return oss.str();
-}
-
 void MapDrawer::DrawPerformanceStats() {
 	frame_count++;
 
@@ -2303,9 +2582,19 @@ void MapDrawer::DrawPerformanceStats() {
 		UpdateRAMUsage();
 		UpdateCPUUsage();
 		perf_update_timer.Start();
-	}
 
-	std::string stats_text = FormatPerformanceStats();
+		if (fps_history_size < fps_history.size()) {
+			fps_history[fps_history_index] = current_fps;
+			fps_history_sum += current_fps;
+			++fps_history_size;
+		} else {
+			fps_history_sum -= fps_history[fps_history_index];
+			fps_history[fps_history_index] = current_fps;
+			fps_history_sum += current_fps;
+		}
+		fps_history_index = (fps_history_index + 1) % fps_history.size();
+		average_fps = fps_history_size == 0 ? 0.0 : fps_history_sum / static_cast<double>(fps_history_size);
+	}
 
 	// Save current matrices and switch to screen-space projection
 	glMatrixMode(GL_PROJECTION);
@@ -2317,23 +2606,104 @@ void MapDrawer::DrawPerformanceStats() {
 	glPushMatrix();
 	glLoadIdentity();
 
+	int width = 240;
+	int height = 232;
+	int margin = 10;
+	int x = std::max(margin, screensize_x - width - margin);
+	int y = margin;
+
+	renderer->flush();
+	renderer->setOrtho(0.0f, static_cast<float>(screensize_x), static_cast<float>(screensize_y), 0.0f);
+	renderer->drawColoredQuad(static_cast<float>(x), static_cast<float>(y), static_cast<float>(width), static_cast<float>(height), { 20, 20, 20, 180 });
+	renderer->drawRect(static_cast<float>(x), static_cast<float>(y), static_cast<float>(width), static_cast<float>(height), { 60, 60, 60, 200 }, 1.0f);
 	renderer->flushAndUnbind();
 
-	glDisable(GL_TEXTURE_2D);
-	glColor3f(1.0f, 1.0f, 0.0f); // Amarelo brilhante
+	int padding = 8;
+	int text_x = x + padding;
+	int text_y = y + padding + 12;
 
-	int x = 10;
-	int y = 20;
+	auto drawText = [&](int dx, int dy, float r, float g, float b, const char* text) {
+		glColor3f(r, g, b);
+		glRasterPos2i(dx, dy);
+		for (int i = 0; text[i] != '\0'; ++i) {
+			drawBitmapChar(rme_bitmap_fixed_9x15, text[i]);
+		}
+	};
 
-	glRasterPos2i(x, y);
-	for (const char& c : stats_text) {
-		drawBitmapChar(rme_bitmap_fixed_9x15, c);
+	char buf[64];
+
+	// FPS
+	float r = 0.0f, g = 1.0f, b = 0.4f;
+	if (current_fps < 15) {
+		r = 1.0f;
+		g = 0.3f;
+		b = 0.3f;
+	} else if (current_fps < 30) {
+		r = 1.0f;
+		g = 0.8f;
+		b = 0.0f;
 	}
+	snprintf(buf, sizeof(buf), "FPS: %.1f", current_fps);
+	drawText(text_x, text_y, r, g, b, buf);
 
-	glEnable(GL_TEXTURE_2D);
+	// Avg
+	float ar = 0.7f, ag = 0.7f, ab = 0.7f;
+	if (average_fps < 15) {
+		ar = 1.0f;
+		ag = 0.3f;
+		ab = 0.3f;
+	} else if (average_fps < 30) {
+		ar = 1.0f;
+		ag = 0.8f;
+		ab = 0.0f;
+	}
+	snprintf(buf, sizeof(buf), "Avg: %.1f", average_fps);
+	drawText(text_x, text_y + 16, ar, ag, ab, buf);
+
+	// Frame time
+	double frameTimeMs = current_fps > 0 ? (1000.0 / current_fps) : 0.0;
+	snprintf(buf, sizeof(buf), "%.1fms", frameTimeMs);
+	drawText(text_x, text_y + 32, 0.6f, 0.6f, 0.6f, buf);
+
+	// CPU
+	snprintf(buf, sizeof(buf), "CPU: %.1f%%", current_cpu);
+	drawText(text_x, text_y + 48, 0.8f, 0.8f, 0.8f, buf);
+
+	// RAM
+	snprintf(buf, sizeof(buf), "RAM: %zu MB", current_ram);
+	drawText(text_x, text_y + 64, 0.8f, 0.8f, 0.8f, buf);
+
+	// Last exact scene rebuild and scene complexity
+	snprintf(buf, sizeof(buf), "Last exact: %.1fms", last_scene_ms);
+	drawText(text_x, text_y + 80, 0.7f, 0.7f, 0.7f, buf);
+	snprintf(buf, sizeof(buf), "Last exact T/I: %zu/%zu", visible_tile_count, visible_item_count);
+	drawText(text_x, text_y + 96, 0.7f, 0.7f, 0.7f, buf);
+	const char* render_mode = isViewportInteractionActive() ? "Scene: cached" : (far_zoom_mode ? "LOD: minimap" : (medium_zoom_mode ? "LOD: medium" : "Scene: exact"));
+	drawText(text_x, text_y + 112, 0.55f, 0.75f, 1.0f, render_mode);
+	snprintf(
+		buf,
+		sizeof(buf),
+		"GPU upload: %d/%d %.2fms",
+		g_gui.gfx.getLastFrameTextureUploads(),
+		g_gui.gfx.getLastFrameTextureAttempts(),
+		g_gui.gfx.getLastFrameTextureUploadTimeMs()
+	);
+	drawText(text_x, text_y + 128, 0.7f, 0.7f, 0.7f, buf);
+	snprintf(buf, sizeof(buf), "Sheets Q/R: %zu/%zu", g_spriteAppearances.getPendingSheetCount(), g_spriteAppearances.getReadySheetCount());
+	drawText(text_x, text_y + 144, 0.7f, 0.7f, 0.7f, buf);
+	snprintf(buf, sizeof(buf), "Atlas: %zu pages / %zu MB", g_gui.gfx.getAtlasPageCount(), g_gui.gfx.getAtlasMemoryBytes() / (1024 * 1024));
+	drawText(text_x, text_y + 160, 0.7f, 0.7f, 0.7f, buf);
+	snprintf(buf, sizeof(buf), "Minimap: %zu pages / %zu KB", minimap_page_cache.getPageCount(), minimap_page_cache.getMemoryBytes() / 1024);
+	drawText(text_x, text_y + 176, 0.7f, 0.7f, 0.7f, buf);
+	const GLRenderBatchStats& batchStats = renderer->getFrameStats();
+	snprintf(buf, sizeof(buf), "Batch C/B/Q: %zu/%zu/%zu", batchStats.drawCalls, batchStats.textureBindings, batchStats.quads);
+	drawText(text_x, text_y + 192, 0.7f, 0.7f, 0.7f, buf);
+	snprintf(buf, sizeof(buf), "Stream: %zu KB O/F:%zu/%zu", batchStats.streamBytes / 1024, batchStats.bufferOrphans, batchStats.mappingFallbacks);
+	drawText(text_x, text_y + 208, 0.7f, 0.7f, 0.7f, buf);
 
 	glPopMatrix();
 	glMatrixMode(GL_PROJECTION);
 	glPopMatrix();
 	glMatrixMode(GL_MODELVIEW);
+	renderer->setOrtho(0.0f, static_cast<float>(screensize_x) * zoom, static_cast<float>(screensize_y) * zoom, 0.0f);
 }

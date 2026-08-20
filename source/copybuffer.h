@@ -41,7 +41,8 @@ public:
 	// Clears the copybuffer (eg. resets it)
 	void clear();
 
-	size_t GetTileCount();
+	// Takes ownership of map and sets the paste anchor (used by terrain stamps).
+	void replace(BaseMap* map, const Position& position);
 
 	BaseMap& getBufferMap();
 

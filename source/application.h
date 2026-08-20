@@ -42,9 +42,13 @@ public:
 	void OnEventLoopEnter(wxEventLoopBase* loop) override;
 	virtual void MacOpenFiles(const wxArrayString& fileNames);
 	int OnExit() override;
+	int OnRun() override;
 	void Unload();
 	void ShutdownServices();
 	bool RequestApplicationRestart();
+	bool IsRestartRequested() const {
+		return m_restart_requested;
+	}
 
 private:
 	bool m_startup = false;
@@ -53,11 +57,13 @@ private:
 	void FixVersionDiscrapencies();
 	bool ParseCommandLineMap(wxString& fileName);
 
+	bool OnExceptionInMainLoop() override;
+	void OnUnhandledException() override;
 	void OnFatalException() override;
 
 #ifdef _USE_PROCESS_COM
-	RMEProcessServer* m_proc_server;
-	wxSingleInstanceChecker* m_single_instance_checker;
+	RMEProcessServer* m_proc_server = nullptr;
+	wxSingleInstanceChecker* m_single_instance_checker = nullptr;
 #endif
 };
 

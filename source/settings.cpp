@@ -27,8 +27,34 @@
 #include <wx/wfstream.h>
 
 #include <string>
-
+#include <thread>
 Settings g_settings;
+
+namespace {
+	bool SaveFileConfigAtomically(wxFileConfig& config, const wxString& filename) {
+		const wxString temporary_filename = filename + ".tmp";
+		{
+			wxFileOutputStream output(temporary_filename);
+			if (!output.IsOk() || !config.Save(output) || !output.IsOk()) {
+				wxRemoveFile(temporary_filename);
+				return false;
+			}
+		}
+		if (!wxRenameFile(temporary_filename, filename, true)) {
+			wxRemoveFile(temporary_filename);
+			return false;
+		}
+		return true;
+	}
+
+	unsigned int GetDefaultWorkerThreads() {
+		unsigned int threads = std::thread::hardware_concurrency();
+		if (threads == 0) {
+			threads = Config::DEFAULT_FALLBACK_WORKER_THREADS;
+		}
+		return std::min<unsigned int>(threads, Config::MAX_WORKER_THREADS);
+	}
+}
 
 Settings::Settings() :
 	store(Config::LAST)
@@ -154,26 +180,26 @@ void Settings::IO(IOMode mode) {
 #define section(s) \
 	if (conf)      \
 	conf->SetPath("/" s)
-#define Int(key, dflt)                                     \
-	do {                                                   \
-		if (mode == DEFAULT) {                             \
-			setInteger(key, dflt);                         \
-		} else if (mode == SAVE) {                         \
-			conf->Write(#key, getInteger(key));            \
-		} else if (mode == LOAD) {                         \
+#define Int(key, dflt)                                                  \
+	do {                                                                \
+		if (mode == DEFAULT) {                                          \
+			setInteger(key, dflt);                                      \
+		} else if (mode == SAVE) {                                      \
+			conf->Write(#key, getInteger(key));                         \
+		} else if (mode == LOAD) {                                      \
 			setInteger(key, conf->Read(#key, static_cast<long>(dflt))); \
-		}                                                  \
+		}                                                               \
 	} while (false)
-#define IntToSave(key, dflt)                               \
-	do {                                                   \
-		if (mode == DEFAULT) {                             \
-			setInteger(key, dflt);                         \
-		} else if (mode == SAVE) {                         \
-			conf->Write(#key, getInteger(key##_TO_SAVE));  \
-		} else if (mode == LOAD) {                         \
+#define IntToSave(key, dflt)                                            \
+	do {                                                                \
+		if (mode == DEFAULT) {                                          \
+			setInteger(key, dflt);                                      \
+		} else if (mode == SAVE) {                                      \
+			conf->Write(#key, getInteger(key##_TO_SAVE));               \
+		} else if (mode == LOAD) {                                      \
 			setInteger(key, conf->Read(#key, static_cast<long>(dflt))); \
-			setInteger(key##_TO_SAVE, getInteger(key));    \
-		}                                                  \
+			setInteger(key##_TO_SAVE, getInteger(key));                 \
+		}                                                               \
 	} while (false)
 #define Float(key, dflt)                        \
 	do {                                        \
@@ -214,8 +240,9 @@ void Settings::IO(IOMode mode) {
 	Int(SHOW_SHADE, 1);
 	Int(SHOW_SPECIAL_TILES, 1);
 	Int(SHOW_ZONE_AREAS, 1);
-	Int(USE_FBO_SCENE_CACHE, 0);
+	Int(USE_FBO_SCENE_CACHE, 1);
 	Int(ANIMATION_FPS, 10);
+	Int(POST_PROCESS_EFFECT, 0);
 	Int(SHOW_SPAWNS, 1);
 	Int(SHOW_ITEMS, 1);
 	Int(HIGHLIGHT_ITEMS, 0);
@@ -224,10 +251,11 @@ void Settings::IO(IOMode mode) {
 	Int(SHOW_HOUSES, 1);
 	Int(SHOW_BLOCKING, 0);
 	Int(SHOW_TOOLTIPS, 1);
-	Int(SHOW_PERFORMANCE_STATS, 0);
+	Int(SHOW_PERFORMANCE_STATS, 1);
 	Int(SHOW_ONLY_TILEFLAGS, 0);
 	Int(SHOW_ONLY_MODIFIED_TILES, 0);
 	Int(SHOW_PREVIEW, 1);
+	Int(SHOW_AUTOBORDER_PREVIEW, 1);
 	Int(SHOW_WALL_HOOKS, 0);
 	Int(SHOW_TOWNS, 0);
 	Int(ALWAYS_SHOW_ZONES, 1);
@@ -242,11 +270,11 @@ void Settings::IO(IOMode mode) {
 
 	section("Editor");
 	String(RECENT_FILES, "");
-	Int(WORKER_THREADS, 1);
+	Int(WORKER_THREADS, GetDefaultWorkerThreads());
 	Int(MERGE_MOVE, 0);
 	Int(MERGE_PASTE, 0);
-	Int(UNDO_SIZE, 400);
-	Int(UNDO_MEM_SIZE, 40);
+	Int(UNDO_SIZE, 16384);
+	Int(UNDO_MEM_SIZE, 4096);
 	Int(GROUP_ACTIONS, 1);
 	Int(SELECTION_TYPE, SELECT_CURRENT_FLOOR);
 	Int(COMPENSATED_SELECT, 1);
@@ -275,6 +303,7 @@ void Settings::IO(IOMode mode) {
 	Int(MONSTER_DEFAULT_WEIGHT, 25);
 	String(MONSTERS_LUA_DIRECTORY, "");
 	String(NPCS_LUA_DIRECTORY, "");
+	String(CANARY_CRYSTAL_ASSETS_DIRECTORY, "");
 	Int(DEFAULT_CLIENT_VERSION, CLIENT_VERSION_NONE);
 	Int(RAW_LIKE_SIMONE, 1);
 	Int(ONLY_ONE_INSTANCE, 1);
@@ -282,8 +311,9 @@ void Settings::IO(IOMode mode) {
 	Int(USE_OTBM_4_FOR_ALL_MAPS, 0);
 	Int(USE_OTGZ, 1);
 	Int(SAVE_WITH_OTB_MAGIC_NUMBER, 0);
-	Int(REPLACE_SIZE, 500);
+	Int(REPLACE_SIZE, 100000);
 	Int(COPY_POSITION_FORMAT, 0);
+	Int(ENABLE_DIAGNOSTIC_LOG, 0);
 
 	section("Graphics");
 	Int(TEXTURE_MANAGEMENT, 1);
@@ -330,12 +360,15 @@ void Settings::IO(IOMode mode) {
 	String(PALETTE_RAW_STYLE, "listbox");
 	Int(THEME, 0);
 	Int(ACTIVE_THEME, -1);
+	String(SPAWN_CONVERTER_DIRECTORY, "");
 	Int(MAP_ITEM_ID_CONVERTER_MEMORY_LIMIT_GIB, 8);
 
 	section("Window");
 	String(PALETTE_LAYOUT, "name=02c30f6048629894000011bc00000002;caption=Palette;state=2099148;dir=4;layer=0;row=0;pos=0;prop=100000;bestw=245;besth=100;minw=-1;minh=-1;maxw=-1;maxh=-1;floatx=-1;floaty=-1;floatw=-1;floath=-1");
 	Int(MINIMAP_VISIBLE, 0);
 	String(MINIMAP_LAYOUT, "name=066e2bc8486298990000259a00000003;caption=Minimap;state=2099151;dir=4;layer=0;row=0;pos=0;prop=100000;bestw=170;besth=130;minw=-1;minh=-1;maxw=-1;maxh=-1;floatx=-1;floaty=-1;floatw=221;floath=164");
+	Int(INGAME_PREVIEW_VISIBLE, 0);
+	String(INGAME_PREVIEW_LAYOUT, "");
 	Int(WINDOW_HEIGHT, 500);
 	Int(WINDOW_WIDTH, 700);
 	Int(WINDOW_MAXIMIZED, 0);
@@ -377,7 +410,7 @@ void Settings::IO(IOMode mode) {
 void Settings::load() {
 	wxConfigBase* conf;
 #ifdef __WINDOWS__
-	FileName const filename("editor.cfg");
+	const FileName filename("editor.cfg");
 	if (filename.FileExists()) { // Use local file if it exists
 		wxFileInputStream file(filename.GetFullPath());
 		conf = newd wxFileConfig(file);
@@ -419,9 +452,14 @@ void Settings::save(bool endoftheworld) {
 		if (!conf) {
 			return;
 		}
-		FileName const filename("editor.cfg");
-		wxFileOutputStream file(filename.GetFullPath());
-		conf->Save(file);
+		const FileName filename("editor.cfg");
+		if (!SaveFileConfigAtomically(*conf, filename.GetFullPath())) {
+			wxLogError("Could not save settings to " + filename.GetFullPath() + ".");
+		}
+	} else if (wxConfig::Get()) {
+		if (!wxConfig::Get()->Flush()) {
+			wxLogError("Could not flush settings to the system configuration store.");
+		}
 	}
 #else
 	wxFileConfig* conf = dynamic_cast<wxFileConfig*>(wxConfig::Get());
@@ -430,18 +468,20 @@ void Settings::save(bool endoftheworld) {
 	}
 	FileName filename("./editor.cfg");
 	if (filename.FileExists()) { // Use local file if it exists
-		wxFileOutputStream file(filename.GetFullPath());
-		conf->Save(file);
+		if (!SaveFileConfigAtomically(*conf, filename.GetFullPath())) {
+			wxLogError("Could not save settings to " + filename.GetFullPath() + ".");
+		}
 	} else { // Else use global (user-specific) conf
 		wxString path = wxStandardPaths::Get().GetUserConfigDir() + "/.rme/editor.cfg";
 		filename.Assign(path);
 		filename.Mkdir(0755, wxPATH_MKDIR_FULL);
-		wxFileOutputStream file(filename.GetFullPath());
-		conf->Save(file);
+		if (!SaveFileConfigAtomically(*conf, filename.GetFullPath())) {
+			wxLogError("Could not save settings to " + filename.GetFullPath() + ".");
+		}
 	}
 #endif
 	if (endoftheworld) {
-		wxConfigBase const* cfg = dynamic_cast<wxConfigBase*>(wxConfig::Get());
+		const wxConfigBase* cfg = dynamic_cast<wxConfigBase*>(wxConfig::Get());
 		wxConfig::Set(nullptr);
 		delete cfg;
 	}

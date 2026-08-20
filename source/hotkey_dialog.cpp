@@ -1,4 +1,3 @@
-#include "main.h"
 #include "hotkey_dialog.h"
 
 #include <wx/listctrl.h>

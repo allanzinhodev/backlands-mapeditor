@@ -28,14 +28,18 @@ namespace MenuBar {
 		OPEN,
 		SAVE,
 		SAVE_AS,
-		GENERATE_MAP,
 		CLOSE,
 		IMPORT_MAP,
-		MAP_ITEM_ID_CONVERTER,
-		IMPORT_MONSTERS,
 		IMPORT_MINIMAP,
+		IMPORT_PNG_MAP,
+		CLEAR_MINIMAP_OVERLAY,
+		MAP_ITEM_ID_CONVERTER,
+		PROCEDURAL_MAP_GENERATOR,
+		SPAWN_NPC_CONVERTER,
+		IMPORT_MONSTERS,
 		EXPORT_MINIMAP,
 		EXPORT_TILESETS,
+		EXPORT_SPAWNS,
 		RELOAD_DATA,
 		RECENT_FILES,
 		PREFERENCES,
@@ -44,6 +48,7 @@ namespace MenuBar {
 		REDO,
 		FIND_ITEM,
 		REPLACE_ITEMS,
+		ADVANCED_REPLACE,
 		SEARCH_ON_MAP_EVERYTHING,
 		SEARCH_ON_MAP_ZONES,
 		SEARCH_ON_MAP_UNIQUE,
@@ -83,8 +88,6 @@ namespace MenuBar {
 		COPY,
 		PASTE,
 		EDIT_TOWNS,
-		EDIT_ITEMS,
-		EDIT_MONSTERS,
 		MAP_CLEANUP,
 		MAP_REMOVE_ITEMS,
 		MAP_REMOVE_CORPSES,
@@ -125,14 +128,20 @@ namespace MenuBar {
 		SHOW_HOUSES,
 		SHOW_PATHING,
 		SHOW_TOOLTIPS,
+		SHOW_PERFORMANCE_STATS,
 		SHOW_PREVIEW,
+		SHOW_AUTOBORDER_PREVIEW,
 		SHOW_WALL_HOOKS,
 		SHOW_TOWNS,
 		ALWAYS_SHOW_ZONES,
 		EXT_HOUSE_SHADER,
 		WIN_MINIMAP,
+		WIN_INGAME_PREVIEW,
 		NEW_PALETTE,
 		TAKE_SCREENSHOT,
+		MATERIALS_WORKBENCH,
+		BORDER_WORKSPACE,
+		LEARN_BORDER_SELECTION,
 		SELECT_TERRAIN,
 		SELECT_DOODAD,
 		SELECT_ITEM,
@@ -141,6 +150,7 @@ namespace MenuBar {
 		SELECT_HOUSE,
 		SELECT_WAYPOINT,
 		SELECT_ZONES,
+		SELECT_SAVED_TERRAIN,
 		SELECT_RAW,
 		FLOOR_0,
 		FLOOR_1,
@@ -201,7 +211,6 @@ public:
 	// File Menu
 	void OnNew(wxCommandEvent& event);
 	void OnOpen(wxCommandEvent& event);
-	void OnGenerateMap(wxCommandEvent& event);
 	void OnOpenRecent(wxCommandEvent& event);
 	void OnSave(wxCommandEvent& event);
 	void OnSaveAs(wxCommandEvent& event);
@@ -212,11 +221,16 @@ public:
 	// Import Menu
 	// Export Menu
 	void OnImportMap(wxCommandEvent& event);
-	void OnMapItemIdConverter(wxCommandEvent& event);
-	void OnImportMonsterData(wxCommandEvent& event);
 	void OnImportMinimap(wxCommandEvent& event);
+	void OnImportPngMap(wxCommandEvent& event);
+	void OnClearMinimapOverlay(wxCommandEvent& event);
+	void OnMapItemIdConverter(wxCommandEvent& event);
+	void OnProceduralMapGenerator(wxCommandEvent& event);
+	void OnSpawnNpcConverter(wxCommandEvent& event);
+	void OnImportMonsterData(wxCommandEvent& event);
 	void OnExportMinimap(wxCommandEvent& event);
 	void OnExportTilesets(wxCommandEvent& event);
+	void OnExportSpawns(wxCommandEvent& event);
 	void OnReloadDataFiles(wxCommandEvent& event);
 
 	// Edit Menu
@@ -243,6 +257,7 @@ public:
 	void OnPaste(wxCommandEvent& event);
 	void OnSearchForItem(wxCommandEvent& event);
 	void OnReplaceItems(wxCommandEvent& event);
+	void OnAdvancedReplace(wxCommandEvent& event);
 	void OnSearchForStuffOnMap(wxCommandEvent& event);
 	void OnSearchForZonesOnMap(wxCommandEvent& event);
 	void OnSearchForUniqueOnMap(wxCommandEvent& event);
@@ -272,8 +287,6 @@ public:
 
 	// Map menu
 	void OnMapEditTowns(wxCommandEvent& event);
-	void OnMapEditItems(wxCommandEvent& event);
-	void OnMapEditMonsters(wxCommandEvent& event);
 	void OnMapCleanHouseItems(wxCommandEvent& event);
 	void OnMapCleanup(wxCommandEvent& event);
 	void OnMapProperties(wxCommandEvent& event);
@@ -290,8 +303,12 @@ public:
 
 	// Window Menu
 	void OnMinimapWindow(wxCommandEvent& event);
+	void OnIngamePreviewWindow(wxCommandEvent& event);
 	void OnNewPalette(wxCommandEvent& event);
 	void OnTakeScreenshot(wxCommandEvent& event);
+	void OnMaterialsWorkbench(wxCommandEvent& event);
+	void OnBorderWorkspace(wxCommandEvent& event);
+	void OnLearnBorderSelection(wxCommandEvent& event);
 	void OnSelectTerrainPalette(wxCommandEvent& event);
 	void OnSelectDoodadPalette(wxCommandEvent& event);
 	void OnSelectItemPalette(wxCommandEvent& event);
@@ -300,6 +317,7 @@ public:
 	void OnSelectCreaturePalette(wxCommandEvent& event);
 	void OnSelectWaypointPalette(wxCommandEvent& event);
 	void OnSelectZonesPalette(wxCommandEvent& event);
+	void OnSelectSavedTerrainPalette(wxCommandEvent& event);
 	void OnSelectRawPalette(wxCommandEvent& event);
 
 	// Floor menu
@@ -313,7 +331,9 @@ public:
 	void OnShowHotkeys(wxCommandEvent& event);
 
 	// Access actions map for hotkey discovery
-	const std::map<std::string, MenuBar::Action*>& GetActions() const { return actions; }
+	const std::map<std::string, MenuBar::Action*>& GetActions() const {
+		return actions;
+	}
 	// Update menu item labels to match current HotkeyManager effective keys
 	void UpdateLabelHotkeys();
 

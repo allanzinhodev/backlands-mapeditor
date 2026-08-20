@@ -79,7 +79,8 @@ enum ClientVersions {
 	CLIENT_VERSION_986 = 49,
 	CLIENT_VERSION_1010 = 50,
 	CLIENT_VERSION_1020 = 51,
-	CLIENT_VERSION_1021 = 52
+	CLIENT_VERSION_1021 = 52,
+	CLIENT_VERSION_1100 = 68
 };
 
 // OTBM versions
@@ -89,6 +90,8 @@ enum MapVersionID {
 	MAP_OTBM_2 = 1,
 	MAP_OTBM_3 = 2,
 	MAP_OTBM_4 = 3,
+	MAP_OTBM_5 = 4,
+	MAP_OTBM_6 = 5,
 };
 
 // The composed version of a otbm file (otbm version, client version)
@@ -112,9 +115,9 @@ struct OtbVersion {
 	// '8.60', '7.40' etc.
 	std::string name;
 	// What file format the OTB is in (version 1..3)
-	OtbFormatVersion format_version{};
+	OtbFormatVersion format_version {};
 	// The minor version ID of the OTB (maps to CLIENT_VERSION in OTServ)
-	ClientVersionID id{};
+	ClientVersionID id {};
 };
 
 // Formats for the metadata file
@@ -201,7 +204,6 @@ public:
 
 	static ClientVersion* get(ClientVersionID id);
 	static ClientVersion* get(const std::string& name);
-	static ClientVersionList getVisible(std::string from, std::string to);
 	static ClientVersionList getAllVisible();
 	static ClientVersionList getAllForOTBMVersion(MapVersionID map_version);
 	static ClientVersionList getAllVersionsSupportedForClientVersion(ClientVersion* v);
@@ -261,6 +263,7 @@ private:
 	// All versions
 	typedef std::map<ClientVersionID, ClientVersion*> VersionMap;
 	static VersionMap client_versions;
+	static ClientVersionList client_version_order;
 	static ClientVersion* latest_version;
 
 	// All otbs

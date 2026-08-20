@@ -120,7 +120,6 @@ void ReplaceItemsListBox::OnDrawItem(wxDC& dc, const wxRect& rect, size_t index)
 	Sprite* sprite1 = g_gui.gfx.getSprite(type1.clientID);
 	const ItemType& type2 = g_items.getItemType(item.withId);
 	Sprite* sprite2 = g_gui.gfx.getSprite(type2.clientID);
-
 	if (sprite1 && sprite2) {
 		int x = rect.GetX();
 		int y = rect.GetY();
@@ -136,6 +135,7 @@ void ReplaceItemsListBox::OnDrawItem(wxDC& dc, const wxRect& rect, size_t index)
 			dc.DrawText(wxString::Format("Total: %u", item.total), x, y + 10);
 		}
 	}
+
 }
 
 wxCoord ReplaceItemsListBox::OnMeasureItem(size_t WXUNUSED(index)) const {

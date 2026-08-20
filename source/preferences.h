@@ -26,20 +26,19 @@
 class PreferencesWindow : public wxDialog {
 public:
 	explicit PreferencesWindow(wxWindow* parent) :
-		PreferencesWindow(parent, false) {};
+		PreferencesWindow(parent, false) { }
 	PreferencesWindow(wxWindow* parent, bool clientVersionSelected);
 	~PreferencesWindow() override;
 
-	void OnClickDefaults(wxCommandEvent&);
 	void OnClickApply(wxCommandEvent&);
 	void OnClickOK(wxCommandEvent&);
 	void OnClickCancel(wxCommandEvent&);
+	void OnCanaryCrystalAssetsChanged(wxFileDirPickerEvent&);
 
 	void OnCollapsiblePane(wxCollapsiblePaneEvent&);
 
 protected:
-	void SetDefaults();
-	void Apply();
+	bool Apply();
 
 	wxBookCtrl* book;
 
@@ -49,6 +48,7 @@ protected:
 	wxCheckBox* only_one_instance_chkbox;
 	wxCheckBox* show_welcome_dialog_chkbox;
 	wxCheckBox* enable_tileset_editing_chkbox;
+	wxCheckBox* diagnostic_log_chkbox;
 	wxSpinCtrl* undo_size_spin;
 	wxSpinCtrl* undo_mem_size_spin;
 	wxSpinCtrl* worker_threads_spin;
@@ -76,6 +76,7 @@ protected:
 	wxCheckBox* hide_items_when_zoomed_chkbox;
 	wxCheckBox* show_performance_stats_chkbox;
 	wxCheckBox* fbo_scene_cache_chkbox;
+	wxChoice* post_process_choice;
 	wxSpinCtrl* animation_fps_spin;
 	wxColourPickerCtrl* cursor_color_pick;
 	wxColourPickerCtrl* cursor_alt_color_pick;
@@ -117,6 +118,7 @@ protected:
 	wxCheckBox* check_sigs_chkbox;
 	wxDirPickerCtrl* monsters_lua_dir_picker;
 	wxDirPickerCtrl* npcs_lua_dir_picker;
+	wxDirPickerCtrl* canary_crystal_assets_dir_picker;
 
 	// Create controls
 	wxChoice* AddPaletteStyleChoice(wxWindow* parent, wxSizer* sizer, const wxString& short_description, const wxString& description, const std::string& setting);

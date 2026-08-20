@@ -28,8 +28,7 @@ Map::Map() :
 	houses(*this),
 	has_changed(false),
 	unnamed(false),
-	waypoints(*this),
-	zones(*this) {
+	waypoints(*this) {
 	// Earliest version possible
 	// Caller is responsible for converting us to proper version
 	mapVersion.otbm = MAP_OTBM_1;
@@ -46,6 +45,10 @@ bool Map::open(const std::string& file, const ItemIdCodec* itemIdCodec) {
 	}
 
 	tilecount = 0;
+	// The unique-id index describes the map being replaced. Both current callers
+	// pass a freshly constructed Map, so this is unreachable today, but the reset
+	// belongs next to the tilecount reset that is already here.
+	uidRefCount.clear();
 
 	IOMapOTBM maploader(getVersion());
 	maploader.useItemIdCodec(itemIdCodec);
@@ -265,40 +268,6 @@ void Map::cleanInvalidTiles(bool showdialog) {
 	}
 }
 
-void Map::cleanDeletedZones(bool showdialog) {
-	if (showdialog) {
-		g_gui.CreateLoadBar("Removing deleted zones...");
-	}
-
-	uint64_t tiles_done = 0;
-
-	for (MapIterator miter = begin(); miter != end(); ++miter) {
-		Tile* tile = (*miter)->get();
-		ASSERT(tile);
-
-		if (tile->size() == 0) {
-			continue;
-		}
-
-		for (auto iter = tile->zones.begin(); iter != tile->zones.end();) {
-			if (zones.hasZone(*iter)) {
-				++iter;
-			} else {
-				iter = tile->zones.erase(iter);
-			}
-		}
-
-		++tiles_done;
-		if (showdialog && tiles_done % 0x10000 == 0) {
-			g_gui.SetLoadDone(int(tiles_done / double(getTileCount()) * 100.0));
-		}
-	}
-
-	if (showdialog) {
-		g_gui.DestroyLoadBar();
-	}
-}
-
 Position Map::getZonePosition(unsigned int zoneId) {
 	Position pos;
 	for (MapIterator miter = begin(); miter != end(); ++miter) {
@@ -377,26 +346,30 @@ void Map::updateUniqueIds(Tile* old_tile, Tile* new_tile) {
 }
 
 void Map::addUniqueId(uint16_t uid) {
-	auto it = std::find(uniqueIds.begin(), uniqueIds.end(), uid);
-	if (it == uniqueIds.end()) {
-		uniqueIds.push_back(uid);
+	if (uid == 0) {
+		return;
 	}
+	if (uidRefCount.empty()) {
+		uidRefCount.assign(std::numeric_limits<uint16_t>::max() + 1, 0);
+	}
+	++uidRefCount[uid];
 }
 
 void Map::removeUniqueId(uint16_t uid) {
-	auto it = std::find(uniqueIds.begin(), uniqueIds.end(), uid);
-	if (it != uniqueIds.end()) {
-		uniqueIds.erase(it);
+	if (uid == 0 || uidRefCount.empty()) {
+		return;
+	}
+	if (uidRefCount[uid] > 0) {
+		--uidRefCount[uid];
 	}
 }
 
 bool Map::hasUniqueId(uint16_t uid) const {
-	if (uid == 0 || uniqueIds.empty()) {
+	if (uid == 0 || uidRefCount.empty()) {
 		return false;
 	}
 
-	auto it = std::find(uniqueIds.begin(), uniqueIds.end(), uid);
-	return it != uniqueIds.end();
+	return uidRefCount[uid] != 0;
 }
 
 MapVersion Map::getVersion() const {

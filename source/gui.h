@@ -21,6 +21,8 @@
 #include "graphics.h"
 #include "position.h"
 
+#include <chrono>
+
 #include "copybuffer.h"
 #include "dcbutton.h"
 #include "brush_enums.h"
@@ -53,6 +55,7 @@ class MapCanvas;
 
 class SearchResultWindow;
 class MinimapWindow;
+class IngamePreviewWindow;
 class PaletteWindow;
 class OldPropertiesWindow;
 class TilesetWindow;
@@ -146,13 +149,14 @@ public:
 
 	/**
 	 * Sets the scale of the loading bar.
-	 * Calling this with (50, 80) means that setting 50 as 'done',
-	 * it will display as 0% loaded, 80 will display as 100% loaded.
+	 * Sets the scale mapping for SetLoadDone, where 'done' represents a local
+	 * percentage from 0 to 100 that is linearly mapped into the global range
+	 * [from, to] and saturated between 0 and 100.
 	 */
 	void SetLoadScale(int32_t from, int32_t to);
 
 	void ShowWelcomeDialog(const wxBitmap& icon);
-	void FinishWelcomeDialog();
+	void FinishWelcomeDialog(bool showMainWindow = true);
 	bool IsWelcomeDialogShown();
 
 	/**
@@ -217,6 +221,13 @@ public:
 	void UpdateMinimap(bool immediate = false);
 	bool IsMinimapVisible() const;
 
+	// In-game preview
+	void CreateIngamePreview();
+	void DestroyIngamePreview();
+	void UpdateIngamePreview();
+	void ReleaseIngamePreviewEditor(Editor* editor);
+	bool IsIngamePreviewVisible() const;
+
 	int GetCurrentFloor();
 	void ChangeFloor(int newfloor);
 
@@ -225,7 +236,7 @@ public:
 
 	void SwitchMode();
 	void SetSelectionMode();
-	void SetDrawingMode();
+	void SetDrawingMode(bool preserveSelection = false);
 	bool IsSelectionMode() const {
 		return mode == SELECTION_MODE;
 	}
@@ -240,6 +251,8 @@ public:
 
 	// Brushes
 	void FillDoodadPreviewBuffer();
+	void RefreshAutoborderPreview();
+	void InvalidateAutoborderPreview();
 	// Selects the currently seleceted brush in the active palette
 	void SelectBrush();
 	// Updates the palette AND selects the brush, second parameter is first palette to look in
@@ -290,6 +303,10 @@ public:
 	// Persists the per-version user creatures.xml (imported monsters/NPCs) without tearing down the version.
 	void SaveUserCreatures();
 	bool LoadVersion(ClientVersionID ver, wxString& error, wxArrayString& warnings, bool force = false);
+	bool LoadCanaryCrystalAssets(wxString& error, wxArrayString& warnings, bool force = false);
+	bool IsCanaryCrystalAssetsLoaded() const {
+		return canary_crystal_assets_loaded;
+	}
 	// The current version loaded (returns CLIENT_VERSION_NONE if no version is loaded)
 	const ClientVersion& GetCurrentVersion() const;
 	ClientVersionID GetCurrentVersionID() const;
@@ -316,8 +333,6 @@ public:
 		return pasting;
 	}
 
-	bool CanUndo();
-	bool CanRedo();
 	bool DoUndo();
 	bool DoRedo();
 
@@ -328,22 +343,21 @@ public:
 	EditorTab* GetCurrentTab();
 	EditorTab* GetTab(int idx);
 	int GetTabCount() const;
-	bool IsAnyEditorOpen() const;
 	bool IsEditorOpen() const;
 	void CloseCurrentEditor();
 	Editor* GetCurrentEditor();
 	MapTab* GetCurrentMapTab() const;
 	void CycleTab(bool forward = true);
-	bool CloseAllEditors();
+	bool CloseAllEditors(bool querySave = true);
 	void NewMapView();
 
 	// Map
 	Map& GetCurrentMap();
 	int GetOpenMapCount();
 	bool ShouldSave();
-	void SaveCurrentMap(const FileName& filename, bool showdialog); // "" means default filename
-	void SaveCurrentMap(bool showdialog = true) {
-		SaveCurrentMap(wxString(""), showdialog);
+	bool SaveCurrentMap(const FileName& filename, bool showdialog); // "" means default filename
+	bool SaveCurrentMap(bool showdialog = true) {
+		return SaveCurrentMap(wxString(""), showdialog);
 	}
 	bool NewMap();
 	void OpenMap();
@@ -354,7 +368,9 @@ public:
 
 protected:
 	bool LoadMapInternal(const FileName& fileName, EditorClientVersionPolicy clientVersionPolicy, const ItemIdCodec* readCodec = nullptr, bool detachedDecodedView = false);
+	bool ConfigureSpawnSaveAs(const FileName& mapFilename);
 	bool LoadDataFiles(wxString& error, wxArrayString& warnings);
+	bool LoadCanaryCrystalDataFiles(wxString& error, wxArrayString& warnings);
 	ClientVersion* getLoadedVersion() const {
 		return loaded_version == CLIENT_VERSION_NONE ? nullptr : ClientVersion::get(loaded_version);
 	}
@@ -369,7 +385,7 @@ public:
 	// Rebuild forces palette to reload the entire contents
 	void RebuildPalettes();
 	// Refresh only updates the content (such as house/waypoint list)
-	void RefreshPalettes(Map* m = nullptr, bool usedfault = true);
+	void RefreshPalettes(Map* m = nullptr, bool usedfault = true, bool selectBrush = true);
 	// Won't refresh the palette in the parameter
 	void RefreshOtherPalettes(PaletteWindow* p);
 	// If no palette is shown, this displays the primary palette
@@ -380,8 +396,6 @@ public:
 
 	// Returns primary palette
 	PaletteWindow* GetPalette();
-	// Returns list of all palette, first in the list is primary
-	const std::list<PaletteWindow*>& GetPalettes();
 
 	void DestroyPalettes();
 	// Hidden from public view
@@ -400,6 +414,7 @@ public:
 	CopyBuffer copybuffer;
 
 	MinimapWindow* minimap;
+	IngamePreviewWindow* ingame_preview;
 	DCButton* gem; // The small gem in the lower-right corner
 	SearchResultWindow* search_result_window;
 	GraphicManager gfx;
@@ -441,6 +456,7 @@ protected:
 	wxGLContext* OGLContext;
 
 	ClientVersionID loaded_version;
+	bool canary_crystal_assets_loaded;
 	EditorMode mode;
 	bool pasting;
 
@@ -465,13 +481,22 @@ protected:
 	// Progress bar tracking
 	//=========================================================================
 	wxString progressText;
-	wxGenericProgressDialog* progressBar;
+	wxProgressDialog* progressBar = nullptr;
 
-	int32_t progressFrom;
-	int32_t progressTo;
-	int32_t currentProgress;
+	int32_t progressFrom = 0;
+	int32_t progressTo = 100;
+	int32_t currentProgress = -1;
 
-	wxWindowDisabler* winDisabler;
+	// Long loads (giant OTBM maps) can spend well over Windows' five-second
+	// unresponsive threshold inside a single integer percent. Update() is the only
+	// point that pumps the message queue, so it is also driven by elapsed time.
+	std::chrono::steady_clock::time_point lastProgressPump;
+
+	// Prevents reentrant calls to SetLoadDone() if Update() processes
+	// GUI events and causes another progress update recursively.
+	bool progressUpdating = false;
+	bool destroyPending = false;
+
 	int disabled_counter;
 
 	friend class RenderingLock;
