@@ -58838,7 +58838,7 @@
 		<attribute key="stackable" value="1" />
 	</item>
 
-	<!-- Temple floor (Auto-injected) -->
+	<!-- Auto-injected: Temple floor -->
 	<item id="54752" article="a" name="Temple floor" />
 	<item id="54753" article="a" name="Temple floor" />
 	<item id="54754" article="a" name="Temple floor" />
