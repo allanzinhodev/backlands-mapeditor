@@ -20934,4 +20934,24 @@
 	<brush name="festive tree (on)" type="doodad" lookid="30238" draggable="true" on_blocking="true" thickness="10/10">
 		<item id="30238" chance="10"/>
 	</brush>
+	<brush name="temple floor" type="doodad" server_lookid="54752" draggable="true" on_blocking="true" thickness="100/100">
+		<composite chance="10">
+			<tile x="0" y="0"> <item id="54752"/> </tile>
+			<tile x="1" y="0"> <item id="54753"/> </tile>
+			<tile x="2" y="0"> <item id="54754"/> </tile>
+			<tile x="3" y="0"> <item id="54755"/> </tile>
+			<tile x="0" y="1"> <item id="54756"/> </tile>
+			<tile x="1" y="1"> <item id="54757"/> </tile>
+			<tile x="2" y="1"> <item id="54758"/> </tile>
+			<tile x="3" y="1"> <item id="54759"/> </tile>
+			<tile x="0" y="2"> <item id="54760"/> </tile>
+			<tile x="1" y="2"> <item id="54761"/> </tile>
+			<tile x="2" y="2"> <item id="54762"/> </tile>
+			<tile x="3" y="2"> <item id="54763"/> </tile>
+			<tile x="0" y="3"> <item id="54764"/> </tile>
+			<tile x="1" y="3"> <item id="54765"/> </tile>
+			<tile x="2" y="3"> <item id="54766"/> </tile>
+			<tile x="3" y="3"> <item id="54767"/> </tile>
+		</composite>
+	</brush>
 </materials>
